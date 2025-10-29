@@ -1,6 +1,6 @@
 -- Optional: If you prefer manual SQL instead of SQLAlchemy auto-creation
 CREATE DATABASE IF NOT EXISTS groupchat CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS 'chatuser'@'localhost' IDENTIFIED BY 'chatpass';
+CREATE USER IF NOT EXISTS 'chatuser'@'localhost' IDENTIFIED BY 'ChatPass123!';
 GRANT ALL PRIVILEGES ON groupchat.* TO 'chatuser'@'localhost';
 FLUSH PRIVILEGES;
 
