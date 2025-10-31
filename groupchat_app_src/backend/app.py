@@ -31,9 +31,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve frontend
-app.mount("/", StaticFiles(directory="../frontend", html=True), name="static")
-
 manager = ConnectionManager()
 
 # --------- Schemas ---------
@@ -160,3 +157,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json({"type": "ack", "echo": data})
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+# Serve frontend - mount last to avoid conflicts with API routes
+app.mount("/", StaticFiles(directory="../frontend", html=True), name="static")
