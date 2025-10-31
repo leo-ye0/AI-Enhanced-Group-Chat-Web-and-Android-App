@@ -10,6 +10,7 @@ const authMsg = $("authMsg");
 const signupBtn = $("signupBtn");
 const loginBtn = $("loginBtn");
 const logoutBtn = $("logoutBtn");
+const clearBtn = $("clearBtn");
 const chatInput = $("chatInput");
 const sendBtn = $("sendBtn");
 
@@ -64,6 +65,7 @@ function connectWS() {
     try {
       const data = JSON.parse(ev.data);
       if (data.type === "message") addMessage(data.message);
+      if (data.type === "clear") messagesDiv.innerHTML = "";
     } catch (e) {}
   };
   ws.onclose = () => {
@@ -115,6 +117,20 @@ sendBtn.onclick = async () => {
   if (!text) return;
   chatInput.value = "";
   await callAPI("/messages", "POST", {content: text});
+};
+
+clearBtn.onclick = async () => {
+  console.log("Clear button clicked");
+  if (confirm("Clear all chat history?")) {
+    try {
+      console.log("Calling clear API...");
+      await callAPI("/messages", "DELETE");
+      console.log("Clear API successful");
+    } catch (e) {
+      console.error("Clear failed:", e);
+      alert("Failed to clear chat: " + e.message);
+    }
+  }
 };
 
 if (token) {

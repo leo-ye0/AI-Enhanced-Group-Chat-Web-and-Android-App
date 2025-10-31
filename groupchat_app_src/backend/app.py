@@ -146,6 +146,14 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     asyncio.create_task(maybe_answer_with_llm(session, payload.content))
     return {"ok": True, "id": m.id}
 
+@app.delete("/api/messages")
+async def clear_messages(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    from sqlalchemy import delete
+    await session.execute(delete(Message))
+    await session.commit()
+    await manager.broadcast({"type": "clear"})
+    return {"ok": True}
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     # Optional auth via query param token
