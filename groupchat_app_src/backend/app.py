@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 from typing import Optional, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request
 from fastapi.responses import FileResponse
@@ -32,6 +33,9 @@ app.add_middleware(
 )
 
 manager = ConnectionManager()
+
+# Duplicate prevention: track recent questions
+recent_questions = {}
 
 # --------- Schemas ---------
 class AuthPayload(BaseModel):
@@ -68,6 +72,23 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str):
     # naive heuristic: reply if the message contains a question mark
     if "?" not in content:
         return
+    
+    # Duplicate prevention: check if question was asked recently (within 5 seconds)
+    question_key = content.strip().lower()
+    current_time = time.time()
+    
+    # Clean old entries (older than 10 seconds)
+    for key, timestamp in list(recent_questions.items()):
+        if current_time - timestamp > 10:
+            del recent_questions[key]
+    
+    # Check if this question was asked recently
+    if question_key in recent_questions and current_time - recent_questions[question_key] < 5:
+        return
+    
+    # Mark this question as being processed
+    recent_questions[question_key] = current_time
+    
     system_prompt = (
         "You are a helpful assistant participating in a small group chat. "
         "Provide concise, accurate answers suitable for a shared chat context. "
