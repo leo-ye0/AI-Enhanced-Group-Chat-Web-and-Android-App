@@ -32,10 +32,27 @@
           <button id="logoutBtn">Log Out</button>
         </div>
       </div>
-      <div id="messages" class="messages"></div>
-      <div class="composer">
-        <input id="chatInput" placeholder="Type a message…">
-        <button id="sendBtn">Send</button>
+      <div class="chat-container">
+        <div id="messages" class="messages"></div>
+        <div class="composer">
+          <input id="chatInput" placeholder="Type a message…">
+          <button id="sendBtn">Send</button>
+        </div>
+      </div>
+    </div>
+    <div class="file-preview hidden" id="filePreview">
+      <div class="preview-header">
+        <h3 id="previewTitle">File Preview</h3>
+        <button id="closePreview">×</button>
+      </div>
+      <div class="preview-content" id="previewContent"></div>
+    </div>
+    <div class="chat hidden" id="sidebar">
+      <div class="header">
+        <h2>Uploaded Files</h2>
+      </div>
+      <div class="file-list" id="fileList">
+        <div class="no-files">No files uploaded yet</div>
       </div>
     </div>
   </div>
