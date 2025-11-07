@@ -8,3 +8,9 @@ python-jose[cryptography]
 python-dotenv
 httpx
 jinja2
+python-multipart
+chromadb
+sentence-transformers
+PyPDF2
+python-docx
+numpy<2

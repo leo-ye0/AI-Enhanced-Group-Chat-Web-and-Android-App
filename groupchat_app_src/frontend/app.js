@@ -11,6 +11,8 @@ const signupBtn = $("signupBtn");
 const loginBtn = $("loginBtn");
 const logoutBtn = $("logoutBtn");
 const clearBtn = $("clearBtn");
+const uploadBtn = $("uploadBtn");
+const fileInput = $("fileInput");
 const chatInput = $("chatInput");
 const sendBtn = $("sendBtn");
 
@@ -59,6 +61,7 @@ async function loadMessages() {
 }
 
 function connectWS() {
+  if (ws) ws.close();
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onmessage = (ev) => {
@@ -69,8 +72,9 @@ function connectWS() {
     } catch (e) {}
   };
   ws.onclose = () => {
-    // try to reconnect after a delay
-    setTimeout(connectWS, 2000);
+    if (token) {
+      setTimeout(connectWS, 2000);
+    }
   };
 }
 
@@ -109,14 +113,23 @@ loginBtn.onclick = async () => {
 logoutBtn.onclick = () => {
   token = "";
   localStorage.removeItem("token");
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
   showAuth();
 };
 
 sendBtn.onclick = async () => {
   const text = chatInput.value.trim();
-  if (!text) return;
+  if (!text || sendBtn.disabled) return;
   chatInput.value = "";
-  await callAPI("/messages", "POST", {content: text});
+  sendBtn.disabled = true;
+  try {
+    await callAPI("/messages", "POST", {content: text});
+  } finally {
+    sendBtn.disabled = false;
+  }
 };
 
 clearBtn.onclick = async () => {
@@ -130,6 +143,43 @@ clearBtn.onclick = async () => {
       console.error("Clear failed:", e);
       alert("Failed to clear chat: " + e.message);
     }
+  }
+};
+
+uploadBtn.onclick = () => {
+  fileInput.click();
+};
+
+fileInput.onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  try {
+    uploadBtn.disabled = true;
+    uploadBtn.textContent = 'Uploading...';
+    
+    const response = await fetch(API + '/upload', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token },
+      body: formData
+    });
+    
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Upload failed');
+    }
+    
+    const result = await response.json();
+    alert(`File uploaded successfully! Processed ${result.chunks} chunks.`);
+  } catch (e) {
+    alert('Upload failed: ' + e.message);
+  } finally {
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = 'Upload File';
+    fileInput.value = '';
   }
 };
 

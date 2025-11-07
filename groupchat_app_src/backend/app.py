@@ -1,8 +1,9 @@
 import os
 import asyncio
 import time
+import uuid
 from typing import Optional, List
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,9 @@ from db import SessionLocal, init_db, User, Message
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_token
 from websocket_manager import ConnectionManager
 from llm import chat_completion
+from file_processor import extract_text_from_pdf, extract_text_from_docx, chunk_text
+from vector_db import add_documents, search_documents
+from conversation_chain import conversation_chain
 
 load_dotenv()
 
@@ -89,18 +93,12 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str):
     # Mark this question as being processed
     recent_questions[question_key] = current_time
     
-    system_prompt = (
-        "You are a helpful assistant participating in a small group chat. "
-        "Provide concise, accurate answers suitable for a shared chat context. "
-        "Cite facts succinctly when helpful and avoid extremely long messages."
-    )
     try:
-        reply_text = await chat_completion([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content}
-        ])
+        # Use conversation chain for context-aware responses
+        reply_text = await conversation_chain.get_response(content)
     except Exception as e:
         reply_text = f"(LLM error) {e}"
+    
     bot_msg = Message(user_id=None, content=reply_text, is_bot=True)
     session.add(bot_msg)
     await session.commit()
@@ -163,6 +161,11 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     await session.commit()
     await session.refresh(m)
     await broadcast_message(session, m)
+    
+    # Add user message to conversation history (for non-questions too)
+    if "?" not in payload.content:
+        conversation_chain.add_to_history("user", f"{username}: {payload.content}")
+    
     # fire-and-forget LLM answer
     asyncio.create_task(maybe_answer_with_llm(session, payload.content))
     return {"ok": True, "id": m.id}
@@ -174,6 +177,36 @@ async def clear_messages(username: str = Depends(get_current_user_token), sessio
     await session.commit()
     await manager.broadcast({"type": "clear"})
     return {"ok": True}
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...), username: str = Depends(get_current_user_token)):
+    # Validate file type
+    if not file.filename.lower().endswith(('.pdf', '.docx', '.txt')):
+        raise HTTPException(status_code=400, detail="Only PDF, DOCX, and TXT files are supported")
+    
+    # Read file content
+    content = await file.read()
+    
+    # Extract text based on file type
+    if file.filename.lower().endswith('.pdf'):
+        text = extract_text_from_pdf(content)
+    elif file.filename.lower().endswith('.docx'):
+        text = extract_text_from_docx(content)
+    else:  # .txt file
+        text = content.decode('utf-8')
+    
+    # Chunk the text
+    chunks = chunk_text(text)
+    
+    # Generate IDs and metadata
+    file_id = str(uuid.uuid4())
+    ids = [f"{file_id}_{i}" for i in range(len(chunks))]
+    metadatas = [{"filename": file.filename, "username": username, "chunk_id": i} for i in range(len(chunks))]
+    
+    # Store in vector database
+    add_documents(chunks, metadatas, ids)
+    
+    return {"ok": True, "filename": file.filename, "chunks": len(chunks)}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
