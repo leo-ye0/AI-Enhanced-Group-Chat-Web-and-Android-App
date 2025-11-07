@@ -15,6 +15,14 @@ const uploadBtn = $("uploadBtn");
 const fileInput = $("fileInput");
 const chatInput = $("chatInput");
 const sendBtn = $("sendBtn");
+const fileList = $("fileList");
+const filePreview = $("filePreview");
+const previewTitle = $("previewTitle");
+const previewContent = $("previewContent");
+const closePreview = $("closePreview");
+const toggleSummaries = $("toggleSummaries");
+
+let summariesVisible = true;
 
 const API = location.origin + "/api";
 let token = localStorage.getItem("token") || "";
@@ -28,6 +36,7 @@ function showAuth() {
 function showChat() {
   authPanel.classList.add("hidden");
   chatPanel.classList.remove("hidden");
+  $("sidebar").classList.remove("hidden");
 }
 
 async function callAPI(path, method = "GET", body) {
@@ -60,6 +69,54 @@ async function loadMessages() {
   for (const m of data.messages) addMessage(m);
 }
 
+async function loadFiles() {
+  try {
+    const data = await callAPI("/files");
+    console.log("Files loaded:", data);
+    console.log("First file:", data.files[0]);
+    fileList.innerHTML = "";
+    if (data.files.length === 0) {
+      fileList.innerHTML = '<div class="no-files">No files uploaded yet</div>';
+    } else {
+      for (const file of data.files) {
+        const fileEl = document.createElement("div");
+        fileEl.className = "message";
+        const date = new Date(file.created_at);
+        const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        fileEl.innerHTML = `
+          <div class="meta">
+            <span class="filename">${file.filename}</span> • ${file.username || 'unknown'} • ${dateStr}
+          </div>
+          <div class="file-buttons">
+            <button class="delete-btn" onclick="event.stopPropagation(); deleteFile(${file.id});">Delete</button>
+            <button class="view-btn" onclick="openFileInNewWindow(${file.id}, '${file.filename}')">View</button>
+          </div>
+          <div class="summary" ${summariesVisible ? '' : 'style="display:none"'}>${file.summary || 'No summary available'}</div>
+        `;
+        fileList.appendChild(fileEl);
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load files:", e);
+    fileList.innerHTML = '<div class="no-files">Error loading files</div>';
+  }
+}
+
+function openFileInNewWindow(fileId, filename) {
+  const url = `/api/files/${fileId}/download?token=${token}`;
+  window.open(url, '_blank');
+}
+
+async function deleteFile(fileId) {
+  if (!confirm('Delete this file?')) return;
+  try {
+    await callAPI(`/files/delete/${fileId}`, 'DELETE');
+    await loadFiles();
+  } catch (e) {
+    alert('Failed to delete file: ' + e.message);
+  }
+}
+
 function connectWS() {
   if (ws) ws.close();
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -87,6 +144,7 @@ signupBtn.onclick = async () => {
     token = out.token;
     localStorage.setItem("token", token);
     await loadMessages();
+    await loadFiles();
     connectWS();
     showChat();
   } catch (e) {
@@ -103,6 +161,7 @@ loginBtn.onclick = async () => {
     token = out.token;
     localStorage.setItem("token", token);
     await loadMessages();
+    await loadFiles();
     connectWS();
     showChat();
   } catch (e) {
@@ -117,6 +176,7 @@ logoutBtn.onclick = () => {
     ws.close();
     ws = null;
   }
+  $("sidebar").classList.add("hidden");
   showAuth();
 };
 
@@ -174,6 +234,18 @@ fileInput.onchange = async (e) => {
     
     const result = await response.json();
     alert(`File uploaded successfully! Processed ${result.chunks} chunks.`);
+    await loadFiles();
+    
+    // Check for summary updates every 3 seconds for 30 seconds
+    let checkCount = 0;
+    const summaryCheck = setInterval(async () => {
+      checkCount++;
+      if (checkCount > 10) {
+        clearInterval(summaryCheck);
+        return;
+      }
+      await loadFiles();
+    }, 3000);
   } catch (e) {
     alert('Upload failed: ' + e.message);
   } finally {
@@ -183,8 +255,22 @@ fileInput.onchange = async (e) => {
   }
 };
 
+closePreview.onclick = () => {
+  filePreview.classList.add("hidden");
+};
+
+toggleSummaries.onclick = () => {
+  summariesVisible = !summariesVisible;
+  toggleSummaries.textContent = summariesVisible ? 'Hide Summaries' : 'Show Summaries';
+  
+  const summaries = document.querySelectorAll('.summary');
+  summaries.forEach(summary => {
+    summary.style.display = summariesVisible ? 'block' : 'none';
+  });
+};
+
 if (token) {
-  loadMessages().then(()=>{
+  Promise.all([loadMessages(), loadFiles()]).then(()=>{
     connectWS();
     showChat();
   }).catch(()=>showAuth());

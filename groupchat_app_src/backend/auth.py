@@ -29,6 +29,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=ALGORITHM)
     return encoded_jwt
 
+def decode_access_token(token: str):
+    return jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+
 def get_current_user_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     token = credentials.credentials
     try:

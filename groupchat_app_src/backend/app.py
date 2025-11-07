@@ -12,13 +12,15 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from dotenv import load_dotenv
 
-from db import SessionLocal, init_db, User, Message
+from db import SessionLocal, init_db, User, Message, UploadedFile, UploadedFile
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_token
 from websocket_manager import ConnectionManager
 from llm import chat_completion
 from file_processor import extract_text_from_pdf, extract_text_from_docx, chunk_text
 from vector_db import add_documents, search_documents
 from conversation_chain import conversation_chain
+from summarizer import generate_summary
+from migrations import run_migrations
 
 load_dotenv()
 
@@ -55,6 +57,18 @@ async def get_db() -> AsyncSession:
         yield session
 
 # --------- Utilities ---------
+async def generate_and_update_summary(file_id: int, text: str, filename: str):
+    """Generate summary and update database asynchronously."""
+    try:
+        summary = await generate_summary(text, filename)
+        async with SessionLocal() as session:
+            file_obj = await session.get(UploadedFile, file_id)
+            if file_obj:
+                file_obj.summary = summary
+                await session.commit()
+    except Exception as e:
+        print(f"Summary generation failed for file {file_id}: {e}")
+
 async def broadcast_message(session: AsyncSession, msg: Message):
     # Load username
     username = None
@@ -109,6 +123,7 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str):
 @app.on_event("startup")
 async def on_startup():
     await init_db()
+    await run_migrations()
 
 @app.post("/api/signup")
 async def signup(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
@@ -179,10 +194,16 @@ async def clear_messages(username: str = Depends(get_current_user_token), sessio
     return {"ok": True}
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), username: str = Depends(get_current_user_token)):
+async def upload_file(file: UploadFile = File(...), username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     # Validate file type
     if not file.filename.lower().endswith(('.pdf', '.docx', '.txt')):
         raise HTTPException(status_code=400, detail="Only PDF, DOCX, and TXT files are supported")
+    
+    # Get user
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
     
     # Read file content
     content = await file.read()
@@ -206,7 +227,112 @@ async def upload_file(file: UploadFile = File(...), username: str = Depends(get_
     # Store in vector database
     add_documents(chunks, metadatas, ids)
     
+    # Store file metadata and base64 encoded data in database
+    import base64
+    uploaded_file = UploadedFile(
+        filename=file.filename,
+        file_id=file_id,
+        user_id=u.id,
+        content=text,
+        file_data=base64.b64encode(content).decode('utf-8'),
+        summary="Generating summary..."
+    )
+    session.add(uploaded_file)
+    await session.commit()
+    await session.refresh(uploaded_file)
+    
+    # Generate summary asynchronously
+    asyncio.create_task(generate_and_update_summary(uploaded_file.id, text, file.filename))
+    
     return {"ok": True, "filename": file.filename, "chunks": len(chunks)}
+
+@app.get("/api/files")
+async def get_files(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    # Verify user is authenticated
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    # Get ALL files from ALL users (group chat)
+    files_res = await session.execute(
+        select(UploadedFile).order_by(desc(UploadedFile.created_at))
+    )
+    files = files_res.scalars().all()
+    
+    files_with_users = []
+    for f in files:
+        user_obj = await session.get(User, f.user_id)
+        uploader_username = user_obj.username if user_obj else "unknown"
+        files_with_users.append({
+            "id": f.id,
+            "filename": f.filename,
+            "file_id": f.file_id,
+            "summary": f.summary or "No summary available",
+            "username": uploader_username,
+            "created_at": str(f.created_at)
+        })
+    
+    return {"files": files_with_users}
+
+@app.delete("/api/files/delete/{file_id}")
+async def delete_file(file_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    from sqlalchemy import delete
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    result = await session.execute(
+        delete(UploadedFile).where(UploadedFile.id == file_id, UploadedFile.user_id == u.id)
+    )
+    await session.commit()
+    
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return {"ok": True}
+
+@app.get("/api/files/{file_id}/download")
+async def download_file(file_id: int, token: str, session: AsyncSession = Depends(get_db)):
+    from auth import decode_access_token
+    from fastapi.responses import Response
+    try:
+        payload = decode_access_token(token)
+        username = payload.get("sub")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    file_res = await session.execute(
+        select(UploadedFile).where(UploadedFile.id == file_id, UploadedFile.user_id == u.id)
+    )
+    file_obj = file_res.scalar_one_or_none()
+    if not file_obj or not file_obj.file_data:
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    # Decode base64 data
+    import base64
+    file_content = base64.b64decode(file_obj.file_data)
+    
+    # Determine content type
+    content_type = "application/octet-stream"
+    if file_obj.filename.lower().endswith('.pdf'):
+        content_type = "application/pdf"
+    elif file_obj.filename.lower().endswith('.txt'):
+        content_type = "text/plain"
+    elif file_obj.filename.lower().endswith('.docx'):
+        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    
+    return Response(
+        content=file_content,
+        media_type=content_type,
+        headers={"Content-Disposition": f"inline; filename={file_obj.filename}"}
+    )
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
