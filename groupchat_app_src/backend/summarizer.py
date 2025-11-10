@@ -7,11 +7,27 @@ async def generate_summary(text: str, filename: str) -> str:
     
     messages = [{
         "role": "user",
-        "content": f"Provide a concise summary of this document:\n\n{truncated_text}\n\nSummary:"
+        "content": f"Provide a concise summary of this document. Do not include any preamble like 'Here is a summary' or 'Here is a concise summary'. Just provide the summary directly:\n\n{truncated_text}\n\nSummary:"
     }]
     
     try:
         summary = await chat_completion(messages)
-        return summary.strip()
+        # Remove common prefixes if LLM still includes them
+        summary = summary.strip()
+        prefixes = [
+            "Here is a concise summary of the document:",
+            "Here is a summary of the document:",
+            "Here is a concise summary:",
+            "Here is a summary:",
+            "Here's a concise summary of the document:",
+            "Here's a summary of the document:",
+            "Here's a concise summary:",
+            "Here's a summary:"
+        ]
+        for prefix in prefixes:
+            if summary.startswith(prefix):
+                summary = summary[len(prefix):].strip()
+                break
+        return summary
     except Exception as e:
         return f"Summary generation failed: {str(e)}"
