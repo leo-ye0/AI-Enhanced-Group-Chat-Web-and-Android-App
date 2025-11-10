@@ -18,6 +18,8 @@ class ConversationChain:
         """Generate response using conversation history and vector search"""
         # Search for relevant documents
         search_results = search_documents(user_question, n_results=3)
+        print(f"Search query: {user_question}")
+        print(f"Search results: {search_results}")
         
         # Build context from vector database
         context = ""
@@ -25,6 +27,9 @@ class ConversationChain:
             context = "\n\nRelevant information from uploaded documents:\n"
             for doc in search_results['documents'][0]:
                 context += f"- {doc[:300]}...\n"
+            print(f"Context built: {context[:200]}...")
+        else:
+            print("No documents found in search results")
         
         # Build conversation messages
         messages = [
@@ -56,3 +61,8 @@ class ConversationChain:
 
 # Global conversation chain instance
 conversation_chain = ConversationChain(max_history=50)
+
+def clear_conversation_history():
+    """Clear the conversation history"""
+    global conversation_chain
+    conversation_chain.conversation_history = []

@@ -17,8 +17,8 @@ from auth import get_password_hash, verify_password, create_access_token, get_cu
 from websocket_manager import ConnectionManager
 from llm import chat_completion
 from file_processor import extract_text_from_pdf, extract_text_from_docx, chunk_text
-from vector_db import add_documents, search_documents
-from conversation_chain import conversation_chain
+from vector_db import add_documents, search_documents, delete_documents_by_file_id
+from conversation_chain import conversation_chain, clear_conversation_history
 from summarizer import generate_summary
 from migrations import run_migrations
 
@@ -87,12 +87,8 @@ async def broadcast_message(session: AsyncSession, msg: Message):
     })
 
 async def maybe_answer_with_llm(session: AsyncSession, content: str):
-    # naive heuristic: reply if the message contains a question mark
-    if "?" not in content:
-        return
-    
-    # Duplicate prevention: check if question was asked recently (within 5 seconds)
-    question_key = content.strip().lower()
+    # Duplicate prevention: check if message was sent recently (within 5 seconds)
+    message_key = content.strip().lower()
     current_time = time.time()
     
     # Clean old entries (older than 10 seconds)
@@ -100,12 +96,12 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str):
         if current_time - timestamp > 10:
             del recent_questions[key]
     
-    # Check if this question was asked recently
-    if question_key in recent_questions and current_time - recent_questions[question_key] < 5:
+    # Check if this message was sent recently
+    if message_key in recent_questions and current_time - recent_questions[message_key] < 5:
         return
     
-    # Mark this question as being processed
-    recent_questions[question_key] = current_time
+    # Mark this message as being processed
+    recent_questions[message_key] = current_time
     
     try:
         # Use conversation chain for context-aware responses
@@ -177,9 +173,8 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     await session.refresh(m)
     await broadcast_message(session, m)
     
-    # Add user message to conversation history (for non-questions too)
-    if "?" not in payload.content:
-        conversation_chain.add_to_history("user", f"{username}: {payload.content}")
+    # Add user message to conversation history
+    conversation_chain.add_to_history("user", payload.content)
     
     # fire-and-forget LLM answer
     asyncio.create_task(maybe_answer_with_llm(session, payload.content))
@@ -190,6 +185,7 @@ async def clear_messages(username: str = Depends(get_current_user_token), sessio
     from sqlalchemy import delete
     await session.execute(delete(Message))
     await session.commit()
+    clear_conversation_history()  # Clear AI conversation memory
     await manager.broadcast({"type": "clear"})
     return {"ok": True}
 
@@ -277,19 +273,25 @@ async def get_files(username: str = Depends(get_current_user_token), session: As
 
 @app.delete("/api/files/delete/{file_id}")
 async def delete_file(file_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
-    from sqlalchemy import delete
     res = await session.execute(select(User).where(User.username == username))
     u = res.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=401, detail="Invalid user")
     
-    result = await session.execute(
-        delete(UploadedFile).where(UploadedFile.id == file_id, UploadedFile.user_id == u.id)
+    # Get file to delete (allow any user to delete any file in group chat)
+    file_res = await session.execute(
+        select(UploadedFile).where(UploadedFile.id == file_id)
     )
-    await session.commit()
-    
-    if result.rowcount == 0:
+    file_obj = file_res.scalar_one_or_none()
+    if not file_obj:
         raise HTTPException(status_code=404, detail="File not found")
+    
+    # Delete from vector database
+    delete_documents_by_file_id(file_obj.file_id)
+    
+    # Delete from database
+    await session.delete(file_obj)
+    await session.commit()
     
     return {"ok": True}
 

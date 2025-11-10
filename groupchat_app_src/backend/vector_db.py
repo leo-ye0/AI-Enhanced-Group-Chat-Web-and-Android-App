@@ -2,6 +2,8 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 import os
 from typing import List
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='multiprocessing.resource_tracker')
 
 # Initialize ChromaDB client
 client = chromadb.PersistentClient(path="./chroma_db")
@@ -28,3 +30,19 @@ def search_documents(query: str, n_results: int = 5):
         n_results=n_results
     )
     return results
+
+def delete_documents_by_file_id(file_id: str):
+    """Delete all documents for a specific file"""
+    try:
+        # Get all documents
+        results = collection.get()
+        ids_to_delete = []
+        
+        for chunk_id in results['ids']:
+            if chunk_id.startswith(f"{file_id}_"):
+                ids_to_delete.append(chunk_id)
+        
+        if ids_to_delete:
+            collection.delete(ids=ids_to_delete)
+    except Exception as e:
+        print(f"Error deleting documents for file {file_id}: {e}")
