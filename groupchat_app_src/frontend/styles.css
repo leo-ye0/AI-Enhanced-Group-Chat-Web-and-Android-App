@@ -34,6 +34,8 @@ button:hover{filter:brightness(1.1)}
 .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 .header-buttons{display:flex;gap:8px}
 .composer{display:flex;gap:12px;margin-top:12px;flex-shrink:0;position:relative}
+.bot-toggle-btn{background:none;border:1px solid #374151;border-radius:8px;padding:8px;font-size:18px;cursor:pointer;opacity:0.4;transition:opacity 0.2s}
+.bot-toggle-btn:hover{opacity:0.7;filter:none}
 .mention-dropdown{position:absolute;bottom:100%;left:0;background:#111827;border:1px solid #1f2937;border-radius:8px;padding:4px;margin-bottom:4px;min-width:150px;z-index:100}
 .mention-dropdown.hidden{display:none}
 .mention-item{padding:8px 12px;cursor:pointer;border-radius:4px;font-size:14px}

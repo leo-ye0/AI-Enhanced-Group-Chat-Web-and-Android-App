@@ -42,10 +42,11 @@ const meetingList = $("meetingList");
 const addMeetingBtn = $("addMeetingBtn");
 const transcriptInput = $("transcriptInput");
 const uploadTranscriptBtn = $("uploadTranscriptBtn");
+const botToggle = $("botToggle");
 
 let currentMeetingId = null;
-
 let summariesVisible = true;
+let botAlwaysOn = localStorage.getItem("botAlwaysOn") === "true";
 
 const API = location.origin + "/api";
 let token = localStorage.getItem("token") || "";
@@ -239,6 +240,18 @@ function insertCommand(cmd) {
   chatInput.focus();
 }
 
+botToggle.onclick = () => {
+  botAlwaysOn = !botAlwaysOn;
+  localStorage.setItem("botAlwaysOn", botAlwaysOn);
+  botToggle.style.opacity = botAlwaysOn ? "1" : "0.4";
+  chatInput.placeholder = botAlwaysOn ? "Bot is always listening..." : "Type a message… (use @bot or / for commands)";
+};
+
+if (botAlwaysOn) {
+  botToggle.style.opacity = "1";
+  chatInput.placeholder = "Bot is always listening...";
+}
+
 sendBtn.onclick = async () => {
   const text = chatInput.value.trim();
   if (!text || sendBtn.disabled) return;
@@ -246,7 +259,8 @@ sendBtn.onclick = async () => {
   mentionDropdown.classList.add('hidden');
   sendBtn.disabled = true;
   try {
-    await callAPI("/messages", "POST", {content: text});
+    const content = botAlwaysOn && !text.startsWith("/") && !text.includes("@bot") ? "@bot " + text : text;
+    await callAPI("/messages", "POST", {content});
   } finally {
     sendBtn.disabled = false;
   }
