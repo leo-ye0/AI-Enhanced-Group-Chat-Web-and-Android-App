@@ -53,6 +53,8 @@ class Task(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     content: Mapped[str] = mapped_column(Text())
     extracted_from_message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), nullable=True)
+    assigned_to: Mapped[str] = mapped_column(Text(), nullable=True)
+    due_date: Mapped[str] = mapped_column(String(100), nullable=True)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.pending)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -64,6 +66,7 @@ class Meeting(Base):
     duration_minutes: Mapped[int] = mapped_column()
     zoom_link: Mapped[str] = mapped_column(Text(), nullable=True)
     transcript_file_id: Mapped[int] = mapped_column(ForeignKey("uploaded_files.id", ondelete="SET NULL"), nullable=True)
+    attendees: Mapped[str] = mapped_column(Text(), nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

@@ -10,22 +10,24 @@ button:hover{filter:brightness(1.1)}
 #chat{flex-grow:1}
 .chat{flex:1;max-width:800px}
 #chat + #sidebar{margin-left:24px}
-#sidebar{width:250px;flex:none;max-height:30vh;overflow:hidden;display:flex;flex-direction:column}
-.chat-container{height:60vh;display:flex;flex-direction:column}
-.file-list{flex:1;overflow:auto;border:1px solid #1f2937;border-radius:12px;padding:12px;background:#0b1220}
+#sidebar{width:250px;flex:none;max-height:30vh;overflow:hidden;display:flex;flex-direction:column;background:#111827;border:1px solid #1f2937;border-radius:16px;padding:0}
+.chat-container{height:calc(30vh + 25vh + 25vh + 32px);display:flex;flex-direction:column}
+.file-list{flex:1;overflow:auto;padding:12px;background:#0b1220}
 .sidebar-header{padding:12px;border-bottom:1px solid #1f2937;flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
 .sidebar-header h3{margin:0;font-size:14px}
+.file-item{padding:8px;margin:6px 0;border-radius:8px;background:#111827;border:1px solid #1f2937;font-size:12px}
+.file-name{font-weight:500;margin-bottom:4px}
+.file-meta{opacity:0.7;font-size:11px;margin-bottom:4px}
+.file-summary{font-size:11px;opacity:0.8;margin:4px 0;line-height:1.3}
+.file-actions{display:flex;gap:4px;margin-top:4px}
 .message .meta{display:block;margin-bottom:4px}
 .message .filename{font-weight:500}
 .message .summary{margin-top:6px;opacity:0.9}
-.file-buttons{display:flex;gap:8px;margin:4px 0}
-.delete-btn{background:#dc2626;color:#fff;border:none;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px}
-.delete-btn:hover{background:#b91c1c}
-.view-btn{background:#4f46e5;color:#fff;border:none;border-radius:3px;padding:2px 6px;cursor:pointer;font-size:10px}
-.view-btn:hover{filter:brightness(1.1)}
 .toggle-btn{background:#6b7280;color:#fff;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:10px}
 .toggle-btn:hover{background:#4b5563}
 .no-files{padding:12px;text-align:center;opacity:0.5;font-size:12px}
+.no-tasks{padding:12px;text-align:center;opacity:0.5;font-size:12px}
+.no-meetings{padding:12px;text-align:center;opacity:0.5;font-size:12px}
 .main-chat{display:flex;flex-direction:column;height:100%}
 .messages{flex:1;overflow:auto;border:1px solid #1f2937;border-radius:12px;padding:12px;background:#0b1220;min-height:0}
 .message{padding:10px 12px;margin:10px 0;border-radius:12px;background:#111827;border:1px solid #1f2937}
@@ -68,7 +70,6 @@ button:hover{filter:brightness(1.1)}
 .task-delete:hover{background:#b91c1c}
 .task-item.completed{opacity:0.5}
 .task-item.completed .task-content{text-decoration:line-through}
-.no-tasks{padding:12px;text-align:center;opacity:0.5;font-size:12px}
 .meeting-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:1000;display:flex;align-items:center;justify-content:center}
 .meeting-modal .modal-content{background:#111827;border:1px solid #1f2937;border-radius:12px;width:400px;max-width:90vw}
 .meeting-modal .modal-header{display:flex;justify-content:space-between;align-items:center;padding:16px;border-bottom:1px solid #1f2937}
@@ -86,7 +87,6 @@ button:hover{filter:brightness(1.1)}
 .meeting-item .meeting-time{opacity:0.7;font-size:11px;margin-bottom:4px}
 .meeting-item .meeting-link{color:#4f46e5;text-decoration:none;font-size:11px;word-break:break-all}
 .meeting-item button{margin-top:4px}
-.no-meetings{padding:12px;text-align:center;opacity:0.5;font-size:12px}
 @media (max-width: 768px) {
 .container{flex-direction:column}
 #sidebar,#taskPanel{width:100%;height:150px;max-height:150px;margin-top:24px}

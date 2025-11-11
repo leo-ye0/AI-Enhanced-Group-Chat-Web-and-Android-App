@@ -46,6 +46,9 @@ manager = ConnectionManager()
 # Duplicate prevention: track recent questions
 recent_questions = {}
 
+# Context tracking: remember when waiting for meeting info
+waiting_for_meeting_info = {}
+
 # --------- Schemas ---------
 class AuthPayload(BaseModel):
     username: str
@@ -91,26 +94,201 @@ async def broadcast_message(session: AsyncSession, msg: Message):
 
 async def extract_and_save_tasks(session: AsyncSession, content: str, message_id: int):
     """Extract and save tasks from a message."""
+    print(f"Extracting tasks from: {content}")
     tasks = await extract_tasks(content)
+    print(f"Extracted {len(tasks)} tasks: {tasks}")
     if tasks:
-        for task_content in tasks:
-            task = Task(content=task_content, extracted_from_message_id=message_id, status=TaskStatus.pending)
+        for task_data in tasks:
+            if isinstance(task_data, dict):
+                task = Task(
+                    content=task_data.get("task"),
+                    extracted_from_message_id=message_id,
+                    status=TaskStatus.pending,
+                    due_date=task_data.get("due_date") if task_data.get("due_date") else None,
+                    assigned_to=task_data.get("assigned_to") if task_data.get("assigned_to") else None
+                )
+                print(f"Created task: {task.content}, due: {task.due_date}, assigned: {task.assigned_to}")
+            else:
+                task = Task(content=task_data, extracted_from_message_id=message_id, status=TaskStatus.pending)
             session.add(task)
         await session.commit()
+        print("Tasks committed to database")
         await manager.broadcast({"type": "tasks_updated"})
+        print("Broadcast tasks_updated event")
 
-async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_id: int):
-    """Detect meeting requests and broadcast suggestion."""
+async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_id: int) -> bool:
+    """Detect meeting requests and auto-create meeting with extracted details. Returns True if handled."""
+    print(f"detect_and_suggest_meeting called with content: {content}")
+    
+    # Check if we're waiting for meeting info from this user
+    if user_id in waiting_for_meeting_info:
+        import re
+        meeting_data = waiting_for_meeting_info[user_id]
+        
+        # Try to parse datetime
+        datetime_match = re.search(r'(\d{4}-\d{2}-\d{2})[,\s]+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', content, re.IGNORECASE)
+        if datetime_match and not meeting_data.get('datetime'):
+            date_str = datetime_match.group(1)
+            time_str = datetime_match.group(2).strip()
+            
+            # Convert 12-hour format to 24-hour format
+            if 'pm' in time_str.lower() or 'am' in time_str.lower():
+                is_pm = 'pm' in time_str.lower()
+                time_str = time_str.lower().replace('pm', '').replace('am', '').strip()
+                if ':' not in time_str:
+                    time_str = f"{time_str}:00"
+                hour, minute = time_str.split(':')
+                hour = int(hour)
+                if is_pm and hour != 12:
+                    hour += 12
+                elif not is_pm and hour == 12:
+                    hour = 0
+                time_str = f"{hour:02d}:{minute}"
+            elif ':' not in time_str:
+                time_str = f"{time_str}:00"
+            
+            meeting_data['datetime'] = f"{date_str}T{time_str}"
+        
+        # Try to parse zoom link FIRST and remove it from content
+        content_without_url = content
+        if not meeting_data.get('zoom_link'):
+            zoom_match = re.search(r'https?://[^\s]+', content)
+            if zoom_match:
+                meeting_data['zoom_link'] = zoom_match.group(0)
+                content_without_url = content.replace(zoom_match.group(0), '')
+        
+        # Try to parse duration (e.g., "60 minutes", "1 hour", "30min")
+        duration_match = re.search(r'(\d+)\s*(?:min|minute|minutes|hour|hours|hrs?)', content_without_url, re.IGNORECASE)
+        if duration_match and not meeting_data.get('duration'):
+            duration = int(duration_match.group(1))
+            if 'hour' in content_without_url.lower() or 'hr' in content_without_url.lower():
+                duration *= 60
+            meeting_data['duration'] = duration
+        
+        # Try to parse attendees (usernames without @) from content WITHOUT URL
+        if not meeting_data.get('attendees'):
+            # Look for usernames (alphanumeric strings), exclude common words
+            exclude = {'bot', 'the', 'and', 'with', 'for', 'meeting', 'schedule', 'minutes', 'hour', 'hours', 'min', 'duration'}
+            usernames = [u for u in re.findall(r'\b([a-z][a-z0-9_]{2,})\b', content_without_url.lower()) if u not in exclude]
+            if usernames:
+                meeting_data['attendees'] = ','.join(usernames)
+        
+        # Check if we have all required info now
+        if meeting_data.get('datetime') and meeting_data.get('attendees') and meeting_data.get('duration') and meeting_data.get('zoom_link'):
+            waiting_for_meeting_info.pop(user_id)
+            
+            # Create meeting
+            meeting = Meeting(
+                title=meeting_data.get('title', 'Team Meeting'),
+                datetime=meeting_data.get('datetime'),
+                duration_minutes=meeting_data.get('duration', 60),
+                zoom_link=meeting_data.get('zoom_link'),
+                attendees=meeting_data.get('attendees'),
+                created_by=user_id
+            )
+            session.add(meeting)
+            await session.commit()
+            await session.refresh(meeting)
+            
+            await manager.broadcast({"type": "meetings_updated"})
+            
+            attendees_str = f" with {meeting.attendees}" if meeting.attendees else ""
+            bot_msg = Message(
+                user_id=None,
+                content=f"✅ Meeting created: **{meeting.title}** on {meeting.datetime.split('T')[0]} at {meeting.datetime.split('T')[1]}{attendees_str}.",
+                is_bot=True
+            )
+            session.add(bot_msg)
+            await session.commit()
+            await session.refresh(bot_msg)
+            await broadcast_message(session, bot_msg)
+            return True
+        else:
+            # Still missing some info
+            missing = []
+            if not meeting_data.get('datetime'):
+                missing.append('date/time (YYYY-MM-DD, HH:MM)')
+            if not meeting_data.get('attendees'):
+                missing.append('attendees (usernames)')
+            if not meeting_data.get('duration'):
+                missing.append('duration (minutes)')
+            if not meeting_data.get('zoom_link'):
+                missing.append('Zoom link (https://zoom.us/j/...)')
+            
+            waiting_for_meeting_info[user_id] = meeting_data
+            missing_str = ', '.join(missing)
+            bot_msg = Message(
+                user_id=None,
+                content=f"Missing: {missing_str}",
+                is_bot=True
+            )
+            session.add(bot_msg)
+            await session.commit()
+            await session.refresh(bot_msg)
+            await broadcast_message(session, bot_msg)
+            return True
+    
     meeting_info = await detect_meeting_request(content)
+    print(f"Meeting info detected: {meeting_info}")
     if meeting_info:
-        await manager.broadcast({
-            "type": "meeting_suggestion",
-            "data": {
-                "title": meeting_info.get("title", "Team Meeting"),
-                "suggested_times": meeting_info.get("suggested_times", ""),
-                "duration": meeting_info.get("duration", 30)
-            }
-        })
+        # Check what info is missing
+        missing = []
+        if not meeting_info.get("datetime"):
+            missing.append("date/time (YYYY-MM-DD, HH:MM)")
+        if not meeting_info.get("attendees"):
+            missing.append("attendees (usernames)")
+        if not meeting_info.get("duration"):
+            missing.append("duration (minutes)")
+        if not meeting_info.get("zoom_link"):
+            missing.append("Zoom link (https://zoom.us/j/...)")
+        
+        if missing:
+            # Store meeting info and wait for missing details
+            waiting_for_meeting_info[user_id] = meeting_info
+            missing_str = ", ".join(missing)
+            bot_msg = Message(
+                user_id=None,
+                content=f"Meeting request detected. Missing: {missing_str}",
+                is_bot=True
+            )
+            session.add(bot_msg)
+            await session.commit()
+            await session.refresh(bot_msg)
+            await broadcast_message(session, bot_msg)
+            return True
+        
+        # Create meeting with all provided info
+        print(f"Creating meeting with datetime: {meeting_info.get('datetime')}")
+        meeting = Meeting(
+            title=meeting_info.get("title", "Team Meeting"),
+            datetime=meeting_info.get("datetime"),
+            duration_minutes=meeting_info.get("duration", 60),
+            zoom_link=meeting_info.get("zoom_link"),
+            attendees=meeting_info.get("attendees"),
+            created_by=user_id
+        )
+        session.add(meeting)
+        await session.commit()
+        await session.refresh(meeting)
+        print(f"✅ Meeting created in DB: ID={meeting.id}, title={meeting.title}, datetime={meeting.datetime}, attendees={meeting.attendees}")
+        
+        # Broadcast update FIRST
+        await manager.broadcast({"type": "meetings_updated"})
+        print("Broadcast meetings_updated event")
+        
+        # Send confirmation message
+        attendees_str = f" with {meeting.attendees}" if meeting.attendees else ""
+        bot_msg = Message(
+            user_id=None,
+            content=f"✅ Meeting created: **{meeting.title}** on {meeting.datetime.split('T')[0]} at {meeting.datetime.split('T')[1]}{attendees_str}.",
+            is_bot=True
+        )
+        session.add(bot_msg)
+        await session.commit()
+        await session.refresh(bot_msg)
+        await broadcast_message(session, bot_msg)
+        return True
+    return False
 
 async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id: int = None):
     # Check for project commands
@@ -125,6 +303,14 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id:
             reply_text = "📋 Pending Tasks:\n" + "\n".join([f"{i+1}. {t.content}" for i, t in enumerate(tasks)])
         else:
             reply_text = "No pending tasks found."
+    elif content.strip().lower() == "/assign":
+        tasks_res = await session.execute(select(Task).where(Task.status == TaskStatus.pending, Task.assigned_to == None).order_by(desc(Task.created_at)).limit(1))
+        task = tasks_res.scalar_one_or_none()
+        if task:
+            await manager.broadcast({"type": "open_assign_modal", "task_id": task.id})
+        else:
+            reply_text = "No unassigned tasks found."
+        return
     elif content.strip().lower() == "/schedule":
         await manager.broadcast({"type": "open_meeting_modal"})
         return
@@ -171,6 +357,59 @@ async def signup(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
     token = create_access_token({"sub": u.username})
     return {"ok": True, "token": token}
 
+async def generate_login_summary(username: str, session: AsyncSession) -> str:
+    """Generate personalized summary for user on login."""
+    # Get recent messages
+    msgs_res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(20))
+    messages = list(reversed(msgs_res.scalars().all()))
+    
+    # Get user's pending tasks
+    tasks_res = await session.execute(
+        select(Task).where(
+            Task.status == TaskStatus.pending,
+            Task.assigned_to.like(f"%{username}%")
+        ).order_by(Task.due_date)
+    )
+    user_tasks = tasks_res.scalars().all()
+    
+    # Get upcoming meetings
+    from datetime import datetime
+    meetings_res = await session.execute(
+        select(Meeting).where(Meeting.datetime >= datetime.now().isoformat()).order_by(Meeting.datetime).limit(3)
+    )
+    meetings = meetings_res.scalars().all()
+    
+    # Build context
+    context = f"User {username} just logged in. Provide a brief welcome summary.\n\n"
+    
+    if messages:
+        context += "Recent chat (last 20 messages):\n"
+        for m in messages[-10:]:
+            if m.is_bot:
+                context += f"Bot: {m.content[:100]}...\n"
+            else:
+                user_res = await session.get(User, m.user_id)
+                uname = user_res.username if user_res else "unknown"
+                context += f"{uname}: {m.content[:100]}...\n"
+    
+    if user_tasks:
+        context += f"\n{username}'s pending tasks:\n"
+        for t in user_tasks:
+            context += f"- {t.content} (due: {t.due_date or 'no date'})\n"
+    
+    if meetings:
+        context += "\nUpcoming meetings:\n"
+        for m in meetings:
+            context += f"- {m.title} at {m.datetime}\n"
+    
+    prompt = f"{context}\n\nProvide ONLY a brief, friendly welcome message (2-3 sentences) summarizing key updates and reminders for {username}. Do not include any prefix like 'Here's a message' or 'Welcome message:'. Start directly with the greeting."
+    
+    try:
+        summary = await chat_completion([{"role": "user", "content": prompt}])
+        return summary
+    except:
+        return f"Welcome back, {username}! Check your tasks and recent messages."
+
 @app.post("/api/login")
 async def login(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
     res = await session.execute(select(User).where(User.username == payload.username))
@@ -178,6 +417,21 @@ async def login(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
     if not u or not verify_password(payload.password, u.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_access_token({"sub": u.username})
+    
+    # Generate login summary asynchronously
+    async def send_summary():
+        async with SessionLocal() as new_session:
+            summary = await generate_login_summary(payload.username, new_session)
+            # Remove any prefix like "Here's a brief welcome message for username:"
+            import re
+            summary = re.sub(r'^.*?welcome message.*?:\s*["\']?', '', summary, flags=re.IGNORECASE).strip('"\'')
+            bot_msg = Message(user_id=None, content=f"👋 {summary}", is_bot=True)
+            new_session.add(bot_msg)
+            await new_session.commit()
+            await new_session.refresh(bot_msg)
+            await broadcast_message(new_session, bot_msg)
+    
+    asyncio.create_task(send_summary())
     return {"ok": True, "token": token}
 
 @app.get("/api/messages")
@@ -217,18 +471,22 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
         "@bot" in payload.content.lower()
     )
     
-    if should_respond:
+    # Always extract tasks and detect meetings from non-command messages FIRST
+    meeting_handled = False
+    if not payload.content.startswith("/"):
+        await extract_and_save_tasks(session, payload.content, m.id)
+        meeting_handled = await detect_and_suggest_meeting(session, payload.content, u.id)
+    
+    if should_respond and not meeting_handled:
         # Add user message to conversation history (skip commands)
         if not payload.content.startswith("/"):
             conversation_chain.add_to_history("user", payload.content)
         
-        # fire-and-forget LLM answer
-        asyncio.create_task(maybe_answer_with_llm(session, payload.content, m.id))
-    
-    # Always extract tasks and detect meetings from non-command messages
-    if not payload.content.startswith("/"):
-        asyncio.create_task(extract_and_save_tasks(session, payload.content, m.id))
-        asyncio.create_task(detect_and_suggest_meeting(session, payload.content, u.id))
+        # fire-and-forget LLM answer with fresh session
+        async def llm_task():
+            async with SessionLocal() as new_session:
+                await maybe_answer_with_llm(new_session, payload.content, m.id)
+        asyncio.create_task(llm_task())
     
     return {"ok": True, "id": m.id}
 
@@ -392,7 +650,29 @@ async def download_file(file_id: int, token: str, session: AsyncSession = Depend
 async def get_tasks(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     tasks_res = await session.execute(select(Task).order_by(desc(Task.created_at)))
     tasks = tasks_res.scalars().all()
-    return {"tasks": [{"id": t.id, "content": t.content, "status": t.status.value, "created_at": str(t.created_at)} for t in tasks]}
+    result = []
+    for t in tasks:
+        result.append({"id": t.id, "content": t.content, "status": t.status.value, "assigned_to": t.assigned_to, "due_date": t.due_date, "created_at": str(t.created_at)})
+    return {"tasks": result}
+
+class DueDatePayload(BaseModel):
+    due_date: str
+
+@app.patch("/api/tasks/{task_id}/due-date")
+async def set_due_date(task_id: int, payload: DueDatePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.due_date = payload.due_date
+    await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
+    return {"ok": True}
+
+@app.get("/api/users")
+async def get_users(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    users_res = await session.execute(select(User))
+    users = users_res.scalars().all()
+    return {"users": [{"username": u.username} for u in users]}
 
 @app.patch("/api/tasks/{task_id}/complete")
 async def complete_task(task_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
@@ -407,6 +687,19 @@ async def complete_task(task_id: int, username: str = Depends(get_current_user_t
 async def create_task(payload: MessagePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     task = Task(content=payload.content, status=TaskStatus.pending)
     session.add(task)
+    await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
+    return {"ok": True}
+
+class AssignPayload(BaseModel):
+    usernames: str
+
+@app.patch("/api/tasks/{task_id}/assign")
+async def assign_task(task_id: int, payload: AssignPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.assigned_to = payload.usernames
     await session.commit()
     await manager.broadcast({"type": "tasks_updated"})
     return {"ok": True}
@@ -497,8 +790,31 @@ async def get_meetings(username: str = Depends(get_current_user_token), session:
         if m.transcript_file_id:
             tf = await session.get(UploadedFile, m.transcript_file_id)
             transcript_filename = tf.filename if tf else None
-        result.append({"id": m.id, "title": m.title, "datetime": m.datetime, "duration_minutes": m.duration_minutes, "zoom_link": m.zoom_link, "transcript_filename": transcript_filename, "created_at": str(m.created_at)})
+        result.append({"id": m.id, "title": m.title, "datetime": m.datetime, "duration_minutes": m.duration_minutes, "zoom_link": m.zoom_link, "transcript_filename": transcript_filename, "attendees": m.attendees, "created_at": str(m.created_at)})
     return {"meetings": result}
+
+@app.patch("/api/meetings/{meeting_id}/attendees")
+async def set_attendees(meeting_id: int, payload: AssignPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting.attendees = payload.usernames
+    await session.commit()
+    await manager.broadcast({"type": "meetings_updated"})
+    return {"ok": True}
+
+class DurationPayload(BaseModel):
+    duration_minutes: int
+
+@app.patch("/api/meetings/{meeting_id}/duration")
+async def set_duration(meeting_id: int, payload: DurationPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting.duration_minutes = payload.duration_minutes
+    await session.commit()
+    await manager.broadcast({"type": "meetings_updated"})
+    return {"ok": True}
 
 @app.delete("/api/meetings/{meeting_id}")
 async def delete_meeting(meeting_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
@@ -507,6 +823,7 @@ async def delete_meeting(meeting_id: int, username: str = Depends(get_current_us
         raise HTTPException(status_code=404, detail="Meeting not found")
     await session.delete(meeting)
     await session.commit()
+    await manager.broadcast({"type": "meetings_updated"})
     return {"ok": True}
 
 @app.websocket("/ws")

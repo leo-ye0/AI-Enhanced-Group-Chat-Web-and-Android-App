@@ -43,8 +43,30 @@ const addMeetingBtn = $("addMeetingBtn");
 const transcriptInput = $("transcriptInput");
 const uploadTranscriptBtn = $("uploadTranscriptBtn");
 const botToggle = $("botToggle");
+const assignModal = $("assignModal");
+const closeAssignModal = $("closeAssignModal");
+const userCheckboxes = $("userCheckboxes");
+const saveAssignBtn = $("saveAssignBtn");
+const dueDateModal = $("dueDateModal");
+const closeDueDateModal = $("closeDueDateModal");
+const dueDateInput = $("dueDateInput");
+const saveDueDateBtn = $("saveDueDateBtn");
+const taskSortBy = $("taskSortBy");
+const taskFilterUser = $("taskFilterUser");
+const taskFilterStatus = $("taskFilterStatus");
+const attendeesModal = $("attendeesModal");
+const closeAttendeesModal = $("closeAttendeesModal");
+const attendeeCheckboxes = $("attendeeCheckboxes");
+const saveAttendeesBtn = $("saveAttendeesBtn");
+const durationModal = $("durationModal");
+const closeDurationModal = $("closeDurationModal");
+const durationInput = $("durationInput");
+const saveDurationBtn = $("saveDurationBtn");
+let currentMeetingIdForAttendees = null;
+let currentMeetingIdForDuration = null;
 
 let currentMeetingId = null;
+let currentTaskId = null;
 let summariesVisible = true;
 let botAlwaysOn = localStorage.getItem("botAlwaysOn") === "true";
 
@@ -104,26 +126,23 @@ async function loadMessages() {
 async function loadFiles() {
   try {
     const data = await callAPI("/files");
-    console.log("Files loaded:", data);
-    console.log("First file:", data.files[0]);
     fileList.innerHTML = "";
     if (data.files.length === 0) {
       fileList.innerHTML = '<div class="no-files">No files uploaded yet</div>';
     } else {
       for (const file of data.files) {
         const fileEl = document.createElement("div");
-        fileEl.className = "message";
+        fileEl.className = "file-item";
         const date = new Date(file.created_at);
         const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         fileEl.innerHTML = `
-          <div class="meta">
-            <span class="filename">${file.filename}</span> • ${file.username || 'unknown'} • ${dateStr}
+          <div class="file-name">${file.filename}</div>
+          <div class="file-meta">${file.username || 'unknown'} • ${dateStr}</div>
+          <div class="file-summary" ${summariesVisible ? '' : 'style="display:none"'}>${file.summary || 'No summary available'}</div>
+          <div class="file-actions">
+            <button class="task-complete" onclick="openFileInNewWindow(${file.id}, '${file.filename}')">View</button>
+            <button class="task-delete" onclick="deleteFile(${file.id})">×</button>
           </div>
-          <div class="file-buttons">
-            <button class="delete-btn" onclick="event.stopPropagation(); deleteFile(${file.id});">Delete</button>
-            <button class="view-btn" onclick="openFileInNewWindow(${file.id}, '${file.filename}')">View</button>
-          </div>
-          <div class="summary" ${summariesVisible ? '' : 'style="display:none"'}>${file.summary || 'No summary available'}</div>
         `;
         fileList.appendChild(fileEl);
       }
@@ -162,6 +181,7 @@ function connectWS() {
       if (data.type === "meetings_updated") loadMeetings();
       if (data.type === "meeting_suggestion") showMeetingSuggestion(data.data);
       if (data.type === "open_meeting_modal") meetingModal.classList.remove('hidden');
+      if (data.type === "open_assign_modal") openAssignModal(data.task_id, '');
     } catch (e) {}
   };
   ws.onclose = () => {
@@ -225,7 +245,7 @@ chatInput.oninput = (e) => {
     mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertMention(\'bot\')">@bot</div>';
     mentionDropdown.classList.remove('hidden');
   } else if (lastSlashPos !== -1 && lastSlashPos === text.length - 1) {
-    mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertCommand(\'project analyze\')">project analyze</div><div class="mention-item" onclick="insertCommand(\'project status\')">project status</div><div class="mention-item" onclick="insertCommand(\'tasks\')">tasks</div><div class="mention-item" onclick="insertCommand(\'schedule\')">schedule</div>';
+    mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertCommand(\'project analyze\')">project analyze</div><div class="mention-item" onclick="insertCommand(\'project status\')">project status</div><div class="mention-item" onclick="insertCommand(\'tasks\')">tasks</div><div class="mention-item" onclick="insertCommand(\'assign\')">assign</div><div class="mention-item" onclick="insertCommand(\'schedule\')">schedule</div>';
     mentionDropdown.classList.remove('hidden');
   } else {
     mentionDropdown.classList.add('hidden');
@@ -345,7 +365,7 @@ toggleSummaries.onclick = () => {
   summariesVisible = !summariesVisible;
   toggleSummaries.textContent = summariesVisible ? 'Hide Summaries' : 'Show Summaries';
   
-  const summaries = document.querySelectorAll('.summary');
+  const summaries = document.querySelectorAll('.file-summary');
   summaries.forEach(summary => {
     summary.style.display = summariesVisible ? 'block' : 'none';
   });
@@ -354,16 +374,49 @@ toggleSummaries.onclick = () => {
 async function loadTasks() {
   try {
     const data = await callAPI("/tasks");
+    let tasks = data.tasks;
+    
+    // Filter by status
+    const statusFilter = taskFilterStatus.value;
+    if (statusFilter !== 'all') {
+      tasks = tasks.filter(t => t.status === statusFilter);
+    }
+    
+    // Filter by user
+    const userFilter = taskFilterUser.value;
+    if (userFilter !== 'all') {
+      tasks = tasks.filter(t => t.assigned_to && t.assigned_to.includes(userFilter));
+    }
+    
+    // Sort tasks
+    const sortBy = taskSortBy.value;
+    if (sortBy === 'due_date') {
+      tasks.sort((a, b) => {
+        if (!a.due_date) return 1;
+        if (!b.due_date) return -1;
+        return a.due_date.localeCompare(b.due_date);
+      });
+    } else if (sortBy === 'status') {
+      tasks.sort((a, b) => a.status.localeCompare(b.status));
+    }
+    
     taskList.innerHTML = "";
-    if (data.tasks.length === 0) {
-      taskList.innerHTML = '<div class="no-tasks">No tasks yet. AI will auto-detect tasks from your messages!</div>';
+    if (tasks.length === 0) {
+      taskList.innerHTML = '<div class="no-tasks">No tasks match the filters</div>';
     } else {
-      for (const task of data.tasks) {
+      for (const task of tasks) {
         const taskEl = document.createElement("div");
         taskEl.className = "task-item" + (task.status === "completed" ? " completed" : "");
+        const assignees = task.assigned_to ? task.assigned_to.split(',').map(u => u.trim()) : [];
+        const assignedBadge = assignees.length > 0 ? `<span style="font-size:10px;color:#10b981;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px" onclick="openAssignModal(${task.id}, '${task.assigned_to}')"><span>👤</span><span>${assignees[0]}${assignees.length > 1 ? ` +${assignees.length - 1}` : ''}</span></span>` : `<button class="task-complete" onclick="openAssignModal(${task.id}, '')" style="font-size:10px">Assign</button>`;
+        const dueDateBadge = task.due_date ? `<span style="font-size:10px;color:#f59e0b;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px" onclick="setDueDate(${task.id}, '${task.due_date}')"><span>📅</span><span>${task.due_date}</span></span>` : `<span style="font-size:10px;color:#6b7280;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px" onclick="setDueDate(${task.id}, '')"><span>📅</span><span>No date</span></span>`;
         taskEl.innerHTML = `
-          <div class="task-content">${task.content}</div>
-          <div class="task-actions">
+          <div class="task-content" style="word-wrap:break-word;overflow-wrap:break-word;min-height:40px;display:flex;align-items:center">${task.content}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:4px">
+            <div>${assignedBadge}</div>
+            <div>${dueDateBadge}</div>
+          </div>
+          <div style="display:flex;gap:4px;margin-top:4px">
             ${task.status === "pending" ? `<button class="task-complete" onclick="completeTask(${task.id})">✓</button>` : ''}
             <button class="task-delete" onclick="deleteTask(${task.id})">×</button>
           </div>
@@ -375,6 +428,54 @@ async function loadTasks() {
     console.error("Failed to load tasks:", e);
   }
 }
+
+async function setDueDate(taskId, currentDueDate) {
+  currentTaskId = taskId;
+  dueDateInput.value = currentDueDate || '';
+  dueDateModal.classList.remove('hidden');
+}
+
+closeDueDateModal.onclick = () => {
+  dueDateModal.classList.add('hidden');
+};
+
+saveDueDateBtn.onclick = async () => {
+  try {
+    await callAPI(`/tasks/${currentTaskId}/due-date`, 'PATCH', {due_date: dueDateInput.value});
+    dueDateModal.classList.add('hidden');
+    await loadTasks();
+  } catch (e) {
+    alert('Failed to set due date: ' + e.message);
+  }
+};
+
+async function openAssignModal(taskId, currentAssignees) {
+  currentTaskId = taskId;
+  const data = await callAPI("/users");
+  const assignedList = currentAssignees ? currentAssignees.split(',').map(u => u.trim()) : [];
+  userCheckboxes.innerHTML = '<div style="display:flex;flex-direction:column;align-items:flex-start">' + data.users.map(u => `
+    <label style="display:flex;align-items:center;padding:6px 0;gap:8px;cursor:pointer">
+      <input type="checkbox" value="${u.username}" ${assignedList.includes(u.username) ? 'checked' : ''} style="margin:0;width:auto">
+      <span>${u.username}</span>
+    </label>
+  `).join('') + '</div>';
+  assignModal.classList.remove('hidden');
+}
+
+closeAssignModal.onclick = () => {
+  assignModal.classList.add('hidden');
+};
+
+saveAssignBtn.onclick = async () => {
+  const checked = Array.from(userCheckboxes.querySelectorAll('input:checked')).map(cb => cb.value);
+  try {
+    await callAPI(`/tasks/${currentTaskId}/assign`, 'PATCH', {usernames: checked.join(',')});
+    assignModal.classList.add('hidden');
+    await loadTasks();
+  } catch (e) {
+    alert('Failed to assign task: ' + e.message);
+  }
+};
 
 async function completeTask(taskId) {
   try {
@@ -429,12 +530,19 @@ async function loadMeetings() {
         meetingEl.className = "meeting-item";
         const formattedTime = meeting.datetime.replace('T', ' ');
         const transcriptBadge = meeting.transcript_filename ? `<span style="font-size:10px;color:#10b981">📄 ${meeting.transcript_filename}</span>` : `<button class="task-complete" onclick="uploadTranscript(${meeting.id})" style="font-size:10px">+ Transcript</button>`;
+        const attendees = meeting.attendees ? meeting.attendees.split(',').map(u => u.trim()) : [];
+        const attendeesBadge = attendees.length > 0 ? `<span style="font-size:10px;color:#10b981;cursor:pointer" onclick="openAttendeesModal(${meeting.id}, '${meeting.attendees}')">👥 ${attendees[0]}${attendees.length > 1 ? ` +${attendees.length - 1}` : ''}</span>` : `<button class="task-complete" onclick="openAttendeesModal(${meeting.id}, '')" style="font-size:10px">+ Attendees</button>`;
+        const durationBadge = `<span style="font-size:10px;color:#f59e0b;cursor:pointer" onclick="setMeetingDuration(${meeting.id}, ${meeting.duration_minutes})">⏱️ ${meeting.duration_minutes}min</span>`;
         meetingEl.innerHTML = `
-          <div class="meeting-title">${meeting.title}</div>
-          <div class="meeting-time">${formattedTime} (${meeting.duration_minutes}min)</div>
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div class="meeting-title">${meeting.title}</div>
+            <button class="task-delete" onclick="deleteMeeting(${meeting.id})" style="margin:0">×</button>
+          </div>
+          <div class="meeting-time">${formattedTime}</div>
           <a href="${meeting.zoom_link}" target="_blank" class="meeting-link">Join Zoom</a>
-          ${transcriptBadge}
-          <button class="task-delete" onclick="deleteMeeting(${meeting.id})">×</button>
+          <div style="margin-top:4px">${durationBadge}</div>
+          <div style="margin-top:4px">${transcriptBadge}</div>
+          <div style="margin-top:4px">${attendeesBadge}</div>
         `;
         meetingList.appendChild(meetingEl);
       }
@@ -443,6 +551,54 @@ async function loadMeetings() {
     console.error("Failed to load meetings:", e);
   }
 }
+
+async function openAttendeesModal(meetingId, currentAttendees) {
+  currentMeetingIdForAttendees = meetingId;
+  const data = await callAPI("/users");
+  const attendeeList = currentAttendees ? currentAttendees.split(',').map(u => u.trim()) : [];
+  attendeeCheckboxes.innerHTML = '<div style="display:flex;flex-direction:column;align-items:flex-start">' + data.users.map(u => `
+    <label style="display:flex;align-items:center;padding:6px 0;gap:8px;cursor:pointer">
+      <input type="checkbox" value="${u.username}" ${attendeeList.includes(u.username) ? 'checked' : ''} style="margin:0;width:auto">
+      <span>${u.username}</span>
+    </label>
+  `).join('') + '</div>';
+  attendeesModal.classList.remove('hidden');
+}
+
+closeAttendeesModal.onclick = () => {
+  attendeesModal.classList.add('hidden');
+};
+
+async function setMeetingDuration(meetingId, currentDuration) {
+  currentMeetingIdForDuration = meetingId;
+  durationInput.value = currentDuration || 60;
+  durationModal.classList.remove('hidden');
+}
+
+closeDurationModal.onclick = () => {
+  durationModal.classList.add('hidden');
+};
+
+saveDurationBtn.onclick = async () => {
+  try {
+    await callAPI(`/meetings/${currentMeetingIdForDuration}/duration`, 'PATCH', {duration_minutes: parseInt(durationInput.value)});
+    durationModal.classList.add('hidden');
+    await loadMeetings();
+  } catch (e) {
+    alert('Failed to set duration: ' + e.message);
+  }
+};
+
+saveAttendeesBtn.onclick = async () => {
+  const checked = Array.from(attendeeCheckboxes.querySelectorAll('input:checked')).map(cb => cb.value);
+  try {
+    await callAPI(`/meetings/${currentMeetingIdForAttendees}/attendees`, 'PATCH', {usernames: checked.join(',')});
+    attendeesModal.classList.add('hidden');
+    await loadMeetings();
+  } catch (e) {
+    alert('Failed to set attendees: ' + e.message);
+  }
+};
 
 function uploadTranscript(meetingId) {
   currentMeetingId = meetingId;
@@ -538,8 +694,22 @@ async function deleteMeeting(meetingId) {
   }
 }
 
+async function loadUserFilter() {
+  try {
+    const data = await callAPI("/users");
+    taskFilterUser.innerHTML = '<option value="all">All Users</option>' + 
+      data.users.map(u => `<option value="${u.username}">${u.username}</option>`).join('');
+  } catch (e) {
+    console.error("Failed to load users:", e);
+  }
+}
+
+taskSortBy.onchange = loadTasks;
+taskFilterUser.onchange = loadTasks;
+taskFilterStatus.onchange = loadTasks;
+
 if (token) {
-  Promise.all([loadMessages(), loadFiles(), loadTasks(), loadMeetings()]).then(()=>{
+  Promise.all([loadMessages(), loadFiles(), loadTasks(), loadMeetings(), loadUserFilter()]).then(()=>{
     connectWS();
     showChat();
   }).catch(()=>showAuth());

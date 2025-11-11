@@ -52,7 +52,7 @@
     <div class="right-column hidden" id="rightColumn">
       <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
-          <h3>Uploaded Files</h3>
+          <h3>📁 Uploaded Files</h3>
           <button id="toggleSummaries" class="toggle-btn">Hide Summaries</button>
         </div>
         <div class="file-list" id="fileList">
@@ -63,6 +63,21 @@
         <div class="task-header">
           <h3>📋 Tasks</h3>
           <button id="addTaskBtn" class="toggle-btn">+ Add</button>
+        </div>
+        <div style="padding:4px 8px;display:flex;gap:4px;border-bottom:1px solid #e5e7eb">
+          <select id="taskSortBy" style="padding:2px 4px;font-size:10px;border:1px solid #ddd;border-radius:3px;flex:1">
+            <option value="recent">Recent</option>
+            <option value="due_date">Due Date</option>
+            <option value="status">Status</option>
+          </select>
+          <select id="taskFilterUser" style="padding:2px 4px;font-size:10px;border:1px solid #ddd;border-radius:3px;flex:1">
+            <option value="all">All</option>
+          </select>
+          <select id="taskFilterStatus" style="padding:2px 4px;font-size:10px;border:1px solid #ddd;border-radius:3px;flex:1">
+            <option value="all">All</option>
+            <option value="pending">Pending</option>
+            <option value="completed">Done</option>
+          </select>
         </div>
         <div class="task-input hidden" id="taskInput">
           <input id="newTaskContent" placeholder="Enter task...">
@@ -85,6 +100,54 @@
         </div>
       </div>
       <input type="file" id="transcriptInput" accept=".txt,.vtt,.srt" style="display:none">
+    </div>
+    <div class="meeting-modal hidden" id="assignModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>👤 Assign Task</h3>
+          <button id="closeAssignModal">×</button>
+        </div>
+        <div class="modal-body">
+          <div id="userCheckboxes"></div>
+          <button id="saveAssignBtn" class="toggle-btn" style="width:100%;margin-top:8px">Save Assignment</button>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="attendeesModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>👥 Meeting Attendees</h3>
+          <button id="closeAttendeesModal">×</button>
+        </div>
+        <div class="modal-body">
+          <div id="attendeeCheckboxes"></div>
+          <button id="saveAttendeesBtn" class="toggle-btn" style="width:100%;margin-top:8px">Save Attendees</button>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="dueDateModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>📅 Set Due Date</h3>
+          <button id="closeDueDateModal">×</button>
+        </div>
+        <div class="modal-body">
+          <input id="dueDateInput" type="date" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px">
+          <button id="saveDueDateBtn" class="toggle-btn" style="width:100%;margin-top:8px">Save Due Date</button>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="durationModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>⏱️ Set Duration</h3>
+          <button id="closeDurationModal">×</button>
+        </div>
+        <div class="modal-body">
+          <input id="durationInput" type="number" placeholder="Duration in minutes" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px">
+          <button id="saveDurationBtn" class="toggle-btn" style="width:100%;margin-top:8px">Save Duration</button>
+        </div>
+      </div>
     </div>
     <div class="meeting-modal hidden" id="meetingModal">
       <div class="modal-content">
