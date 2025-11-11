@@ -1,5 +1,6 @@
 *{box-sizing:border-box}body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;background:#0f172a;color:#e2e8f0;margin:0}
-.container{max-width:1200px;margin:0 auto;padding:16px;display:flex;gap:24px}
+.container{max-width:1200px;margin:0 auto;padding:16px;display:flex;gap:24px;align-items:flex-start}
+.right-column{display:flex;flex-direction:column;width:250px;flex:none}
 .auth,.chat{background:#111827;border:1px solid #1f2937;border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.3);padding:16px}
 .row{display:flex;gap:8px;margin:8px 0}
 input{flex:1;padding:8px 10px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e2e8f0;width:100%;max-width:100%;overflow:hidden;text-overflow:ellipsis}
@@ -9,7 +10,7 @@ button:hover{filter:brightness(1.1)}
 #chat{flex-grow:1}
 .chat{flex:1;max-width:800px}
 #chat + #sidebar{margin-left:24px}
-#sidebar{width:250px;flex:none;max-height:60vh;overflow:hidden;display:flex;flex-direction:column}
+#sidebar{width:250px;flex:none;max-height:30vh;overflow:hidden;display:flex;flex-direction:column}
 .chat-container{height:60vh;display:flex;flex-direction:column}
 .file-list{flex:1;overflow:auto;border:1px solid #1f2937;border-radius:12px;padding:12px;background:#0b1220}
 .sidebar-header{padding:12px;border-bottom:1px solid #1f2937;flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
@@ -32,7 +33,11 @@ button:hover{filter:brightness(1.1)}
 .message.bot{background:#0a1e2e;border-color:#0e7490}
 .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 .header-buttons{display:flex;gap:8px}
-.composer{display:flex;gap:12px;margin-top:12px;flex-shrink:0}
+.composer{display:flex;gap:12px;margin-top:12px;flex-shrink:0;position:relative}
+.mention-dropdown{position:absolute;bottom:100%;left:0;background:#111827;border:1px solid #1f2937;border-radius:8px;padding:4px;margin-bottom:4px;min-width:150px;z-index:100}
+.mention-dropdown.hidden{display:none}
+.mention-item{padding:8px 12px;cursor:pointer;border-radius:4px;font-size:14px}
+.mention-item:hover{background:#1f2937}
 .file-preview{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:1000;display:none;align-items:center;justify-content:center}
 .file-preview:not(.hidden){display:flex}
 .file-preview .preview-header{display:flex;justify-content:space-between;align-items:center;padding:16px;border-bottom:1px solid #1f2937;background:#111827}
@@ -46,6 +51,44 @@ button:hover{filter:brightness(1.1)}
 .container{flex-direction:column}
 #sidebar{width:100%;height:150px;max-height:150px;margin-top:24px}
 }
+.task-panel{width:250px;flex:none;max-height:25vh;overflow:hidden;display:flex;flex-direction:column;background:#111827;border:1px solid #1f2937;border-radius:16px;padding:0;margin-top:16px}
+.task-header{padding:12px;border-bottom:1px solid #1f2937;flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
+.task-input{padding:12px;border-bottom:1px solid #1f2937;background:#0b1220}
+.task-input input{width:100%;margin:0}
+.task-header h3{margin:0;font-size:14px}
+.task-list{flex:1;overflow:auto;padding:12px;background:#0b1220}
+.task-item{padding:8px;margin:6px 0;border-radius:8px;background:#111827;border:1px solid #1f2937;display:flex;justify-content:space-between;align-items:start;gap:8px}
+.task-content{flex:1;font-size:12px;line-height:1.4}
+.task-actions{display:flex;gap:4px;flex-shrink:0}
+.task-complete{background:#10b981;color:#fff;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:10px}
+.task-complete:hover{background:#059669}
+.task-delete{background:#dc2626;color:#fff;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;font-size:10px}
+.task-delete:hover{background:#b91c1c}
+.task-item.completed{opacity:0.5}
+.task-item.completed .task-content{text-decoration:line-through}
+.no-tasks{padding:12px;text-align:center;opacity:0.5;font-size:12px}
+.meeting-modal{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:1000;display:flex;align-items:center;justify-content:center}
+.meeting-modal .modal-content{background:#111827;border:1px solid #1f2937;border-radius:12px;width:400px;max-width:90vw}
+.meeting-modal .modal-header{display:flex;justify-content:space-between;align-items:center;padding:16px;border-bottom:1px solid #1f2937}
+.meeting-modal .modal-header h3{margin:0}
+.meeting-modal .modal-header button{background:none;border:none;color:#e2e8f0;font-size:24px;cursor:pointer}
+.meeting-modal .modal-body{padding:16px}
+.meeting-modal .modal-body input{width:100%;margin-bottom:8px}
+.suggested-times{margin:8px 0;font-size:12px;opacity:0.8}
+.meeting-panel{width:250px;flex:none;max-height:25vh;overflow:hidden;display:flex;flex-direction:column;background:#111827;border:1px solid #1f2937;border-radius:16px;padding:0;margin-top:16px}
+.meeting-header{padding:12px;border-bottom:1px solid #1f2937;flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
+.meeting-header h3{margin:0;font-size:14px}
+.meeting-list{flex:1;overflow:auto;padding:12px;background:#0b1220}
+.meeting-item{padding:8px;margin:6px 0;border-radius:8px;background:#111827;border:1px solid #1f2937;font-size:12px}
+.meeting-item .meeting-title{font-weight:500;margin-bottom:4px}
+.meeting-item .meeting-time{opacity:0.7;font-size:11px;margin-bottom:4px}
+.meeting-item .meeting-link{color:#4f46e5;text-decoration:none;font-size:11px;word-break:break-all}
+.meeting-item button{margin-top:4px}
+.no-meetings{padding:12px;text-align:center;opacity:0.5;font-size:12px}
+@media (max-width: 768px) {
+.container{flex-direction:column}
+#sidebar,#taskPanel{width:100%;height:150px;max-height:150px;margin-top:24px}
+}
 @media (max-width: 480px) {
 .container{padding:8px;max-width:100%}
 .auth,.chat{padding:12px}
@@ -55,6 +98,6 @@ button{padding:8px 12px;font-size:14px}
 h1{font-size:20px;margin:0 0 8px 0}
 p{font-size:14px;margin:0 0 12px 0}
 .hint{font-size:11px}
-#sidebar{height:120px;margin-top:24px}
+#sidebar,#taskPanel{height:120px;margin-top:24px}
 .main-chat{height:40vh}
 }

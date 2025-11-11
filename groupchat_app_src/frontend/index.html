@@ -19,7 +19,7 @@
         <button id="signupBtn">Sign Up</button>
         <button id="loginBtn">Log In</button>
       </div>
-      <div class="hint">Hint: messages that contain a question mark “?” will trigger an LLM reply.</div>
+      <div class="hint">Hint: Mention @bot to get AI responses. Use /project analyze, /project status, or /tasks for project management.</div>
       <div id="authMsg" class="msg"></div>
     </div>
     <div class="chat hidden" id="chat">
@@ -35,7 +35,8 @@
       <div class="chat-container">
         <div id="messages" class="messages"></div>
         <div class="composer">
-          <input id="chatInput" placeholder="Type a message…">
+          <div class="mention-dropdown hidden" id="mentionDropdown"></div>
+          <input id="chatInput" placeholder="Type a message… (use @bot or / for commands)">
           <button id="sendBtn">Send</button>
         </div>
       </div>
@@ -47,13 +48,59 @@
       </div>
       <div class="preview-content" id="previewContent"></div>
     </div>
-    <div class="sidebar hidden" id="sidebar">
-      <div class="sidebar-header">
-        <h3>Uploaded Files</h3>
-        <button id="toggleSummaries" class="toggle-btn">Hide Summaries</button>
+    <div class="right-column hidden" id="rightColumn">
+      <div class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+          <h3>Uploaded Files</h3>
+          <button id="toggleSummaries" class="toggle-btn">Hide Summaries</button>
+        </div>
+        <div class="file-list" id="fileList">
+          <div class="no-files">No files uploaded yet</div>
+        </div>
       </div>
-      <div class="file-list" id="fileList">
-        <div class="no-files">No files uploaded yet</div>
+      <div class="task-panel" id="taskPanel">
+        <div class="task-header">
+          <h3>📋 Tasks</h3>
+          <button id="addTaskBtn" class="toggle-btn">+ Add</button>
+        </div>
+        <div class="task-input hidden" id="taskInput">
+          <input id="newTaskContent" placeholder="Enter task...">
+          <div style="display:flex;gap:4px;margin-top:4px">
+            <button id="saveTaskBtn" class="toggle-btn" style="flex:1">Save</button>
+            <button id="cancelTaskBtn" class="toggle-btn" style="flex:1">Cancel</button>
+          </div>
+        </div>
+        <div class="task-list" id="taskList">
+          <div class="no-tasks">No tasks yet. AI will auto-detect tasks from your messages!</div>
+        </div>
+      </div>
+      <div class="meeting-panel" id="meetingPanel">
+        <div class="meeting-header">
+          <h3>📅 Meetings</h3>
+          <button id="addMeetingBtn" class="toggle-btn">+ Add</button>
+        </div>
+        <div class="meeting-list" id="meetingList">
+          <div class="no-meetings">No meetings scheduled</div>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="meetingModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>📅 Schedule Meeting</h3>
+          <button id="closeMeetingModal">×</button>
+        </div>
+        <div class="modal-body">
+          <input id="meetingTitle" placeholder="Meeting title">
+          <input id="meetingDatetime" type="datetime-local">
+          <input id="meetingDuration" type="number" placeholder="Duration (minutes)" value="30">
+          <input id="meetingZoomLink" placeholder="Paste your Zoom link (e.g., https://zoom.us/j/123456789)">
+          <div style="font-size:11px;opacity:0.7;margin-top:4px">
+            📍 Get your personal Zoom link: <a href="https://zoom.us/profile" target="_blank" style="color:#4f46e5">zoom.us/profile</a> → Personal Meeting ID
+          </div>
+          <div id="suggestedTimes" class="suggested-times"></div>
+          <button id="createMeetingBtn" class="toggle-btn" style="width:100%;margin-top:8px">Create Meeting</button>
+        </div>
       </div>
     </div>
   </div>

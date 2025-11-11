@@ -2,8 +2,9 @@ import os
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import String, Text, Boolean, ForeignKey, DateTime, func
+from sqlalchemy import String, Text, Boolean, ForeignKey, DateTime, func, Enum
 from sqlalchemy.dialects.mysql import LONGTEXT
+import enum
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,6 +43,28 @@ class UploadedFile(Base):
     summary: Mapped[str] = mapped_column(Text(), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
     user = relationship("User", back_populates="files")
+
+class TaskStatus(enum.Enum):
+    pending = "pending"
+    completed = "completed"
+
+class Task(Base):
+    __tablename__ = "tasks"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    content: Mapped[str] = mapped_column(Text())
+    extracted_from_message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), nullable=True)
+    status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.pending)
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(255))
+    datetime: Mapped[str] = mapped_column(String(100))
+    duration_minutes: Mapped[int] = mapped_column()
+    zoom_link: Mapped[str] = mapped_column(Text(), nullable=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)

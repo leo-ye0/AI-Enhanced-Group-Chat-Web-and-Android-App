@@ -21,6 +21,25 @@ const previewTitle = $("previewTitle");
 const previewContent = $("previewContent");
 const closePreview = $("closePreview");
 const toggleSummaries = $("toggleSummaries");
+const taskPanel = $("taskPanel");
+const taskList = $("taskList");
+const mentionDropdown = $("mentionDropdown");
+const addTaskBtn = $("addTaskBtn");
+const taskInput = $("taskInput");
+const newTaskContent = $("newTaskContent");
+const saveTaskBtn = $("saveTaskBtn");
+const cancelTaskBtn = $("cancelTaskBtn");
+const meetingModal = $("meetingModal");
+const closeMeetingModal = $("closeMeetingModal");
+const meetingTitle = $("meetingTitle");
+const meetingDatetime = $("meetingDatetime");
+const meetingDuration = $("meetingDuration");
+const meetingZoomLink = $("meetingZoomLink");
+const suggestedTimes = $("suggestedTimes");
+const createMeetingBtn = $("createMeetingBtn");
+const meetingPanel = $("meetingPanel");
+const meetingList = $("meetingList");
+const addMeetingBtn = $("addMeetingBtn");
 
 let summariesVisible = true;
 
@@ -36,7 +55,7 @@ function showAuth() {
 function showChat() {
   authPanel.classList.add("hidden");
   chatPanel.classList.remove("hidden");
-  $("sidebar").classList.remove("hidden");
+  $("rightColumn").classList.remove("hidden");
 }
 
 async function callAPI(path, method = "GET", body) {
@@ -126,6 +145,10 @@ function connectWS() {
       const data = JSON.parse(ev.data);
       if (data.type === "message") addMessage(data.message);
       if (data.type === "clear") messagesDiv.innerHTML = "";
+      if (data.type === "tasks_updated") loadTasks();
+      if (data.type === "meetings_updated") loadMeetings();
+      if (data.type === "meeting_suggestion") showMeetingSuggestion(data.data);
+      if (data.type === "open_meeting_modal") meetingModal.classList.remove('hidden');
     } catch (e) {}
   };
   ws.onclose = () => {
@@ -176,14 +199,47 @@ logoutBtn.onclick = () => {
     ws.close();
     ws = null;
   }
-  $("sidebar").classList.add("hidden");
+  $("rightColumn").classList.add("hidden");
   showAuth();
 };
+
+chatInput.oninput = (e) => {
+  const text = e.target.value;
+  const lastAtPos = text.lastIndexOf('@');
+  const lastSlashPos = text.lastIndexOf('/');
+  
+  if (lastAtPos !== -1 && lastAtPos === text.length - 1) {
+    mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertMention(\'bot\')">@bot</div>';
+    mentionDropdown.classList.remove('hidden');
+  } else if (lastSlashPos !== -1 && lastSlashPos === text.length - 1) {
+    mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertCommand(\'project analyze\')">project analyze</div><div class="mention-item" onclick="insertCommand(\'project status\')">project status</div><div class="mention-item" onclick="insertCommand(\'tasks\')">tasks</div><div class="mention-item" onclick="insertCommand(\'schedule\')">schedule</div>';
+    mentionDropdown.classList.remove('hidden');
+  } else {
+    mentionDropdown.classList.add('hidden');
+  }
+};
+
+function insertMention(name) {
+  const text = chatInput.value;
+  const lastAtPos = text.lastIndexOf('@');
+  chatInput.value = text.substring(0, lastAtPos) + '@' + name + ' ';
+  mentionDropdown.classList.add('hidden');
+  chatInput.focus();
+}
+
+function insertCommand(cmd) {
+  const text = chatInput.value;
+  const lastSlashPos = text.lastIndexOf('/');
+  chatInput.value = text.substring(0, lastSlashPos) + '/' + cmd;
+  mentionDropdown.classList.add('hidden');
+  chatInput.focus();
+}
 
 sendBtn.onclick = async () => {
   const text = chatInput.value.trim();
   if (!text || sendBtn.disabled) return;
   chatInput.value = "";
+  mentionDropdown.classList.add('hidden');
   sendBtn.disabled = true;
   try {
     await callAPI("/messages", "POST", {content: text});
@@ -269,8 +325,150 @@ toggleSummaries.onclick = () => {
   });
 };
 
+async function loadTasks() {
+  try {
+    const data = await callAPI("/tasks");
+    taskList.innerHTML = "";
+    if (data.tasks.length === 0) {
+      taskList.innerHTML = '<div class="no-tasks">No tasks yet. AI will auto-detect tasks from your messages!</div>';
+    } else {
+      for (const task of data.tasks) {
+        const taskEl = document.createElement("div");
+        taskEl.className = "task-item" + (task.status === "completed" ? " completed" : "");
+        taskEl.innerHTML = `
+          <div class="task-content">${task.content}</div>
+          <div class="task-actions">
+            ${task.status === "pending" ? `<button class="task-complete" onclick="completeTask(${task.id})">✓</button>` : ''}
+            <button class="task-delete" onclick="deleteTask(${task.id})">×</button>
+          </div>
+        `;
+        taskList.appendChild(taskEl);
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load tasks:", e);
+  }
+}
+
+async function completeTask(taskId) {
+  try {
+    await callAPI(`/tasks/${taskId}/complete`, 'PATCH');
+    await loadTasks();
+  } catch (e) {
+    alert('Failed to complete task: ' + e.message);
+  }
+}
+
+async function deleteTask(taskId) {
+  try {
+    await callAPI(`/tasks/${taskId}`, 'DELETE');
+    await loadTasks();
+  } catch (e) {
+    alert('Failed to delete task: ' + e.message);
+  }
+}
+
+addTaskBtn.onclick = () => {
+  taskInput.classList.remove('hidden');
+  newTaskContent.focus();
+};
+
+cancelTaskBtn.onclick = () => {
+  taskInput.classList.add('hidden');
+  newTaskContent.value = '';
+};
+
+saveTaskBtn.onclick = async () => {
+  const content = newTaskContent.value.trim();
+  if (!content) return;
+  try {
+    await callAPI('/tasks', 'POST', {content});
+    taskInput.classList.add('hidden');
+    newTaskContent.value = '';
+    await loadTasks();
+  } catch (e) {
+    alert('Failed to add task: ' + e.message);
+  }
+};
+
+async function loadMeetings() {
+  try {
+    const data = await callAPI("/meetings");
+    meetingList.innerHTML = "";
+    if (data.meetings.length === 0) {
+      meetingList.innerHTML = '<div class="no-meetings">No meetings scheduled</div>';
+    } else {
+      for (const meeting of data.meetings) {
+        const meetingEl = document.createElement("div");
+        meetingEl.className = "meeting-item";
+        const formattedTime = meeting.datetime.replace('T', ' ');
+        meetingEl.innerHTML = `
+          <div class="meeting-title">${meeting.title}</div>
+          <div class="meeting-time">${formattedTime} (${meeting.duration_minutes}min)</div>
+          <a href="${meeting.zoom_link}" target="_blank" class="meeting-link">Join Zoom</a>
+          <button class="task-delete" onclick="deleteMeeting(${meeting.id})">×</button>
+        `;
+        meetingList.appendChild(meetingEl);
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load meetings:", e);
+  }
+}
+
+function showMeetingSuggestion(data) {
+  meetingTitle.value = data.title;
+  meetingDuration.value = data.duration;
+  suggestedTimes.innerHTML = `<div>AI Suggested Times: ${data.suggested_times}</div>`;
+  meetingModal.classList.remove('hidden');
+}
+
+closeMeetingModal.onclick = () => {
+  meetingModal.classList.add('hidden');
+};
+
+addMeetingBtn.onclick = () => {
+  meetingModal.classList.remove('hidden');
+};
+
+createMeetingBtn.onclick = async () => {
+  const title = meetingTitle.value.trim();
+  const datetime = meetingDatetime.value;
+  const duration = parseInt(meetingDuration.value);
+  const zoom_link = meetingZoomLink.value.trim() || null;
+  if (!title || !datetime) {
+    alert('Please fill in title and time');
+    return;
+  }
+  if (!zoom_link) {
+    alert('Please add your Zoom link. Get it from: https://zoom.us/profile');
+    return;
+  }
+  try {
+    const result = await callAPI('/meetings', 'POST', {title, datetime, duration_minutes: duration, zoom_link});
+    alert('Meeting created!');
+    meetingModal.classList.add('hidden');
+    meetingTitle.value = '';
+    meetingDatetime.value = '';
+    meetingZoomLink.value = '';
+    suggestedTimes.innerHTML = '';
+    await loadMeetings();
+  } catch (e) {
+    alert('Failed to create meeting: ' + e.message);
+  }
+};
+
+async function deleteMeeting(meetingId) {
+  try {
+    await callAPI(`/meetings/${meetingId}`, 'DELETE');
+    await loadMeetings();
+  } catch (e) {
+    alert('Failed to delete meeting: ' + e.message);
+  }
+}
+
 if (token) {
-  Promise.all([loadMessages(), loadFiles()]).then(()=>{
+  Promise.all([loadMessages(), loadFiles(), loadTasks(), loadMeetings()]).then(()=>{
     connectWS();
     showChat();
   }).catch(()=>showAuth());

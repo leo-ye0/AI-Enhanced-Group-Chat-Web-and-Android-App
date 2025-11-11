@@ -12,7 +12,7 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from dotenv import load_dotenv
 
-from db import SessionLocal, init_db, User, Message, UploadedFile, UploadedFile
+from db import SessionLocal, init_db, User, Message, UploadedFile, Task, TaskStatus, Meeting
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_token
 from websocket_manager import ConnectionManager
 from llm import chat_completion
@@ -21,6 +21,9 @@ from vector_db import add_documents, search_documents, delete_documents_by_file_
 from conversation_chain import conversation_chain, clear_conversation_history
 from summarizer import generate_summary
 from migrations import run_migrations
+from project_manager import analyze_project, get_project_status
+from task_extractor import extract_tasks
+from meeting_detector import detect_meeting_request, generate_zoom_link
 
 load_dotenv()
 
@@ -86,28 +89,63 @@ async def broadcast_message(session: AsyncSession, msg: Message):
         }
     })
 
-async def maybe_answer_with_llm(session: AsyncSession, content: str):
-    # Duplicate prevention: check if message was sent recently (within 5 seconds)
-    message_key = content.strip().lower()
-    current_time = time.time()
-    
-    # Clean old entries (older than 10 seconds)
-    for key, timestamp in list(recent_questions.items()):
-        if current_time - timestamp > 10:
-            del recent_questions[key]
-    
-    # Check if this message was sent recently
-    if message_key in recent_questions and current_time - recent_questions[message_key] < 5:
+async def extract_and_save_tasks(session: AsyncSession, content: str, message_id: int):
+    """Extract and save tasks from a message."""
+    tasks = await extract_tasks(content)
+    if tasks:
+        for task_content in tasks:
+            task = Task(content=task_content, extracted_from_message_id=message_id, status=TaskStatus.pending)
+            session.add(task)
+        await session.commit()
+        await manager.broadcast({"type": "tasks_updated"})
+
+async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_id: int):
+    """Detect meeting requests and broadcast suggestion."""
+    meeting_info = await detect_meeting_request(content)
+    if meeting_info:
+        await manager.broadcast({
+            "type": "meeting_suggestion",
+            "data": {
+                "title": meeting_info.get("title", "Team Meeting"),
+                "suggested_times": meeting_info.get("suggested_times", ""),
+                "duration": meeting_info.get("duration", 30)
+            }
+        })
+
+async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id: int = None):
+    # Check for project commands
+    if content.strip().lower() == "/project analyze":
+        reply_text = await analyze_project()
+    elif content.strip().lower() == "/project status":
+        reply_text = await get_project_status()
+    elif content.strip().lower() == "/tasks":
+        tasks_res = await session.execute(select(Task).where(Task.status == TaskStatus.pending).order_by(desc(Task.created_at)))
+        tasks = tasks_res.scalars().all()
+        if tasks:
+            reply_text = "📋 Pending Tasks:\n" + "\n".join([f"{i+1}. {t.content}" for i, t in enumerate(tasks)])
+        else:
+            reply_text = "No pending tasks found."
+    elif content.strip().lower() == "/schedule":
+        await manager.broadcast({"type": "open_meeting_modal"})
         return
-    
-    # Mark this message as being processed
-    recent_questions[message_key] = current_time
-    
-    try:
-        # Use conversation chain for context-aware responses
-        reply_text = await conversation_chain.get_response(content)
-    except Exception as e:
-        reply_text = f"(LLM error) {e}"
+    else:
+        # Duplicate prevention
+        message_key = content.strip().lower()
+        current_time = time.time()
+        
+        for key, timestamp in list(recent_questions.items()):
+            if current_time - timestamp > 10:
+                del recent_questions[key]
+        
+        if message_key in recent_questions and current_time - recent_questions[message_key] < 5:
+            return
+        
+        recent_questions[message_key] = current_time
+        
+        try:
+            reply_text = await conversation_chain.get_response(content)
+        except Exception as e:
+            reply_text = f"(LLM error) {e}"
     
     bot_msg = Message(user_id=None, content=reply_text, is_bot=True)
     session.add(bot_msg)
@@ -173,11 +211,25 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     await session.refresh(m)
     await broadcast_message(session, m)
     
-    # Add user message to conversation history
-    conversation_chain.add_to_history("user", payload.content)
+    # Check if bot should respond (commands or @bot mentions)
+    should_respond = (
+        payload.content.startswith("/") or 
+        "@bot" in payload.content.lower()
+    )
     
-    # fire-and-forget LLM answer
-    asyncio.create_task(maybe_answer_with_llm(session, payload.content))
+    if should_respond:
+        # Add user message to conversation history (skip commands)
+        if not payload.content.startswith("/"):
+            conversation_chain.add_to_history("user", payload.content)
+        
+        # fire-and-forget LLM answer
+        asyncio.create_task(maybe_answer_with_llm(session, payload.content, m.id))
+    
+    # Always extract tasks and detect meetings from non-command messages
+    if not payload.content.startswith("/"):
+        asyncio.create_task(extract_and_save_tasks(session, payload.content, m.id))
+        asyncio.create_task(detect_and_suggest_meeting(session, payload.content, u.id))
+    
     return {"ok": True, "id": m.id}
 
 @app.delete("/api/messages")
@@ -335,6 +387,80 @@ async def download_file(file_id: int, token: str, session: AsyncSession = Depend
         media_type=content_type,
         headers={"Content-Disposition": f"inline; filename={file_obj.filename}"}
     )
+
+@app.get("/api/tasks")
+async def get_tasks(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    tasks_res = await session.execute(select(Task).order_by(desc(Task.created_at)))
+    tasks = tasks_res.scalars().all()
+    return {"tasks": [{"id": t.id, "content": t.content, "status": t.status.value, "created_at": str(t.created_at)} for t in tasks]}
+
+@app.patch("/api/tasks/{task_id}/complete")
+async def complete_task(task_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.status = TaskStatus.completed
+    await session.commit()
+    return {"ok": True}
+
+@app.post("/api/tasks")
+async def create_task(payload: MessagePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = Task(content=payload.content, status=TaskStatus.pending)
+    session.add(task)
+    await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
+    return {"ok": True}
+
+@app.delete("/api/tasks/{task_id}")
+async def delete_task(task_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await session.delete(task)
+    await session.commit()
+    return {"ok": True}
+
+class MeetingPayload(BaseModel):
+    title: str
+    datetime: str
+    duration_minutes: int
+    zoom_link: Optional[str] = None
+
+@app.post("/api/meetings")
+async def create_meeting(payload: MeetingPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    zoom_link = payload.zoom_link if payload.zoom_link else "No Zoom link provided"
+    meeting = Meeting(
+        title=payload.title,
+        datetime=payload.datetime,
+        duration_minutes=payload.duration_minutes,
+        zoom_link=zoom_link,
+        created_by=u.id
+    )
+    session.add(meeting)
+    await session.commit()
+    await session.refresh(meeting)
+    await manager.broadcast({"type": "meetings_updated"})
+    return {"ok": True, "zoom_link": zoom_link, "id": meeting.id}
+
+@app.get("/api/meetings")
+async def get_meetings(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    meetings_res = await session.execute(select(Meeting).order_by(desc(Meeting.created_at)))
+    meetings = meetings_res.scalars().all()
+    return {"meetings": [{"id": m.id, "title": m.title, "datetime": m.datetime, "duration_minutes": m.duration_minutes, "zoom_link": m.zoom_link, "created_at": str(m.created_at)} for m in meetings]}
+
+@app.delete("/api/meetings/{meeting_id}")
+async def delete_meeting(meeting_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    await session.delete(meeting)
+    await session.commit()
+    return {"ok": True}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
