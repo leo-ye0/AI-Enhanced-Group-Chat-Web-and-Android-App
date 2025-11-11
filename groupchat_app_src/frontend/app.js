@@ -80,7 +80,15 @@ function addMessage(m) {
   meta.className = "meta";
   meta.textContent = `${m.username || "unknown"} • ${new Date(m.created_at).toLocaleString()}`;
   const body = document.createElement("div");
-  body.textContent = m.content;
+  body.style.whiteSpace = "pre-wrap";
+  if (m.is_bot) {
+    body.innerHTML = m.content
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/`(.*?)`/g, '<code>$1</code>');
+  } else {
+    body.textContent = m.content;
+  }
   el.appendChild(meta);
   el.appendChild(body);
   messagesDiv.appendChild(el);
