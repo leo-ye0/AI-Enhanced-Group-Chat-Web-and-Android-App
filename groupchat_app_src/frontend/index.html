@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Group Chat + LLM Bot</title>
+  <title>StudyPal Chat</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="container">
     <div class="auth" id="auth">
-      <h1>Group Chat</h1>
+      <h1>StudyPal Chat</h1>
       <p>Create an account or log in to join the chat.</p>
       <div class="row">
         <input id="username" placeholder="Username">
@@ -24,7 +24,7 @@
     </div>
     <div class="chat hidden" id="chat">
       <div class="header">
-        <h2>Group Chat</h2>
+        <h2>StudyPal Chat</h2>
         <div class="header-buttons">
           <input type="file" id="fileInput" accept=".pdf,.docx,.txt" style="display: none;">
           <button id="uploadBtn">Upload File</button>
@@ -83,6 +83,7 @@
           <div class="no-meetings">No meetings scheduled</div>
         </div>
       </div>
+      <input type="file" id="transcriptInput" accept=".txt,.vtt,.srt" style="display:none">
     </div>
     <div class="meeting-modal hidden" id="meetingModal">
       <div class="modal-content">
@@ -98,6 +99,7 @@
           <div style="font-size:11px;opacity:0.7;margin-top:4px">
             📍 Get your personal Zoom link: <a href="https://zoom.us/profile" target="_blank" style="color:#4f46e5">zoom.us/profile</a> → Personal Meeting ID
           </div>
+          <button id="uploadTranscriptBtn" class="toggle-btn" style="width:100%;margin-top:8px;display:none">📄 Upload Transcript</button>
           <div id="suggestedTimes" class="suggested-times"></div>
           <button id="createMeetingBtn" class="toggle-btn" style="width:100%;margin-top:8px">Create Meeting</button>
         </div>

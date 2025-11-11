@@ -30,7 +30,7 @@ load_dotenv()
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
 
-app = FastAPI(title="Group Chat with LLM Bot")
+app = FastAPI(title="StudyPal Chat")
 
 # Allow same-origin and dev origins by default
 app.add_middleware(
@@ -447,11 +447,58 @@ async def create_meeting(payload: MeetingPayload, username: str = Depends(get_cu
     await manager.broadcast({"type": "meetings_updated"})
     return {"ok": True, "zoom_link": zoom_link, "id": meeting.id}
 
+@app.post("/api/meetings/{meeting_id}/transcript")
+async def upload_transcript(meeting_id: int, file: UploadFile = File(...), username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    if not file.filename.lower().endswith(('.txt', '.vtt', '.srt')):
+        raise HTTPException(status_code=400, detail="Only TXT, VTT, and SRT transcript files supported")
+    
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    
+    content = await file.read()
+    text = content.decode('utf-8')
+    chunks = chunk_text(text)
+    file_id = str(uuid.uuid4())
+    ids = [f"{file_id}_{i}" for i in range(len(chunks))]
+    metadatas = [{"filename": file.filename, "username": username, "chunk_id": i, "meeting_id": meeting_id} for i in range(len(chunks))]
+    add_documents(chunks, metadatas, ids)
+    
+    import base64
+    uploaded_file = UploadedFile(
+        filename=file.filename,
+        file_id=file_id,
+        user_id=u.id,
+        content=text,
+        file_data=base64.b64encode(content).decode('utf-8'),
+        summary="Transcript uploaded"
+    )
+    session.add(uploaded_file)
+    await session.commit()
+    await session.refresh(uploaded_file)
+    
+    meeting.transcript_file_id = uploaded_file.id
+    await session.commit()
+    await manager.broadcast({"type": "meetings_updated"})
+    return {"ok": True}
+
 @app.get("/api/meetings")
 async def get_meetings(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     meetings_res = await session.execute(select(Meeting).order_by(desc(Meeting.created_at)))
     meetings = meetings_res.scalars().all()
-    return {"meetings": [{"id": m.id, "title": m.title, "datetime": m.datetime, "duration_minutes": m.duration_minutes, "zoom_link": m.zoom_link, "created_at": str(m.created_at)} for m in meetings]}
+    result = []
+    for m in meetings:
+        transcript_filename = None
+        if m.transcript_file_id:
+            tf = await session.get(UploadedFile, m.transcript_file_id)
+            transcript_filename = tf.filename if tf else None
+        result.append({"id": m.id, "title": m.title, "datetime": m.datetime, "duration_minutes": m.duration_minutes, "zoom_link": m.zoom_link, "transcript_filename": transcript_filename, "created_at": str(m.created_at)})
+    return {"meetings": result}
 
 @app.delete("/api/meetings/{meeting_id}")
 async def delete_meeting(meeting_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):

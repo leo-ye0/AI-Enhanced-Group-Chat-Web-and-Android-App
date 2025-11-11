@@ -63,6 +63,7 @@ class Meeting(Base):
     datetime: Mapped[str] = mapped_column(String(100))
     duration_minutes: Mapped[int] = mapped_column()
     zoom_link: Mapped[str] = mapped_column(Text(), nullable=True)
+    transcript_file_id: Mapped[int] = mapped_column(ForeignKey("uploaded_files.id", ondelete="SET NULL"), nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

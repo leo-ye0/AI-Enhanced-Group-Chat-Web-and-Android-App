@@ -40,6 +40,10 @@ const createMeetingBtn = $("createMeetingBtn");
 const meetingPanel = $("meetingPanel");
 const meetingList = $("meetingList");
 const addMeetingBtn = $("addMeetingBtn");
+const transcriptInput = $("transcriptInput");
+const uploadTranscriptBtn = $("uploadTranscriptBtn");
+
+let currentMeetingId = null;
 
 let summariesVisible = true;
 
@@ -402,10 +406,12 @@ async function loadMeetings() {
         const meetingEl = document.createElement("div");
         meetingEl.className = "meeting-item";
         const formattedTime = meeting.datetime.replace('T', ' ');
+        const transcriptBadge = meeting.transcript_filename ? `<span style="font-size:10px;color:#10b981">📄 ${meeting.transcript_filename}</span>` : `<button class="task-complete" onclick="uploadTranscript(${meeting.id})" style="font-size:10px">+ Transcript</button>`;
         meetingEl.innerHTML = `
           <div class="meeting-title">${meeting.title}</div>
           <div class="meeting-time">${formattedTime} (${meeting.duration_minutes}min)</div>
           <a href="${meeting.zoom_link}" target="_blank" class="meeting-link">Join Zoom</a>
+          ${transcriptBadge}
           <button class="task-delete" onclick="deleteMeeting(${meeting.id})">×</button>
         `;
         meetingList.appendChild(meetingEl);
@@ -414,6 +420,11 @@ async function loadMeetings() {
   } catch (e) {
     console.error("Failed to load meetings:", e);
   }
+}
+
+function uploadTranscript(meetingId) {
+  currentMeetingId = meetingId;
+  transcriptInput.click();
 }
 
 function showMeetingSuggestion(data) {
@@ -425,6 +436,32 @@ function showMeetingSuggestion(data) {
 
 closeMeetingModal.onclick = () => {
   meetingModal.classList.add('hidden');
+};
+
+transcriptInput.onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file || !currentMeetingId) return;
+  
+  const formData = new FormData();
+  formData.append('file', file);
+  
+  try {
+    const response = await fetch(API + `/meetings/${currentMeetingId}/transcript`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token },
+      body: formData
+    });
+    
+    if (!response.ok) throw new Error('Upload failed');
+    
+    alert('Transcript uploaded!');
+    await loadMeetings();
+  } catch (e) {
+    alert('Failed to upload transcript: ' + e.message);
+  } finally {
+    transcriptInput.value = '';
+    currentMeetingId = null;
+  }
 };
 
 addMeetingBtn.onclick = () => {
@@ -446,16 +483,28 @@ createMeetingBtn.onclick = async () => {
   }
   try {
     const result = await callAPI('/meetings', 'POST', {title, datetime, duration_minutes: duration, zoom_link});
-    alert('Meeting created!');
-    meetingModal.classList.add('hidden');
-    meetingTitle.value = '';
-    meetingDatetime.value = '';
-    meetingZoomLink.value = '';
-    suggestedTimes.innerHTML = '';
+    currentMeetingId = result.id;
+    uploadTranscriptBtn.style.display = 'block';
+    createMeetingBtn.textContent = 'Done';
+    createMeetingBtn.onclick = () => {
+      meetingModal.classList.add('hidden');
+      meetingTitle.value = '';
+      meetingDatetime.value = '';
+      meetingZoomLink.value = '';
+      suggestedTimes.innerHTML = '';
+      uploadTranscriptBtn.style.display = 'none';
+      createMeetingBtn.textContent = 'Create Meeting';
+      createMeetingBtn.onclick = arguments.callee.caller;
+      currentMeetingId = null;
+    };
     await loadMeetings();
   } catch (e) {
     alert('Failed to create meeting: ' + e.message);
   }
+};
+
+uploadTranscriptBtn.onclick = () => {
+  transcriptInput.click();
 };
 
 async function deleteMeeting(meetingId) {
