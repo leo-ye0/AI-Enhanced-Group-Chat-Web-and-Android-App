@@ -62,8 +62,13 @@ const durationModal = $("durationModal");
 const closeDurationModal = $("closeDurationModal");
 const durationInput = $("durationInput");
 const saveDurationBtn = $("saveDurationBtn");
+const zoomLinkModal = $("zoomLinkModal");
+const closeZoomLinkModal = $("closeZoomLinkModal");
+const zoomLinkInput = $("zoomLinkInput");
+const saveZoomLinkBtn = $("saveZoomLinkBtn");
 let currentMeetingIdForAttendees = null;
 let currentMeetingIdForDuration = null;
+let currentMeetingIdForZoomLink = null;
 
 let currentMeetingId = null;
 let currentTaskId = null;
@@ -411,7 +416,7 @@ async function loadTasks() {
         const assignedBadge = assignees.length > 0 ? `<span style="font-size:10px;color:#10b981;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px" onclick="openAssignModal(${task.id}, '${task.assigned_to}')"><span>👤</span><span>${assignees[0]}${assignees.length > 1 ? ` +${assignees.length - 1}` : ''}</span></span>` : `<button class="task-complete" onclick="openAssignModal(${task.id}, '')" style="font-size:10px">Assign</button>`;
         const dueDateBadge = task.due_date ? `<span style="font-size:10px;color:#f59e0b;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px" onclick="setDueDate(${task.id}, '${task.due_date}')"><span>📅</span><span>${task.due_date}</span></span>` : `<span style="font-size:10px;color:#6b7280;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px" onclick="setDueDate(${task.id}, '')"><span>📅</span><span>No date</span></span>`;
         taskEl.innerHTML = `
-          <div class="task-content" style="word-wrap:break-word;overflow-wrap:break-word;min-height:40px;display:flex;align-items:center">${task.content}</div>
+          <div class="task-content" style="word-wrap:break-word;overflow-wrap:break-word;min-height:40px;display:flex;align-items:center;cursor:pointer" onclick="editTaskContent(${task.id}, this)" title="Click to edit">${task.content}</div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:4px">
             <div>${assignedBadge}</div>
             <div>${dueDateBadge}</div>
@@ -535,11 +540,14 @@ async function loadMeetings() {
         const durationBadge = `<span style="font-size:10px;color:#f59e0b;cursor:pointer" onclick="setMeetingDuration(${meeting.id}, ${meeting.duration_minutes})">⏱️ ${meeting.duration_minutes}min</span>`;
         meetingEl.innerHTML = `
           <div style="display:flex;justify-content:space-between;align-items:flex-start">
-            <div class="meeting-title">${meeting.title}</div>
+            <div class="meeting-title" style="cursor:pointer" onclick="editMeetingTitle(${meeting.id}, this)" title="Click to edit">${meeting.title}</div>
             <button class="task-delete" onclick="deleteMeeting(${meeting.id})" style="margin:0">×</button>
           </div>
-          <div class="meeting-time">${formattedTime}</div>
-          <a href="${meeting.zoom_link}" target="_blank" class="meeting-link">Join Zoom</a>
+          <div class="meeting-time" style="cursor:pointer" onclick="editMeetingDatetime(${meeting.id}, '${meeting.datetime}', this)" title="Click to edit">${formattedTime}</div>
+          <div style="display:flex;gap:4px;align-items:center">
+            <a href="${meeting.zoom_link}" target="_blank" class="meeting-link" style="flex:1">Zoom link</a>
+            <button class="task-complete" onclick="updateZoomLink(${meeting.id}, '${meeting.zoom_link.replace(/'/g, "\\'")}')">Update</button>
+          </div>
           <div style="margin-top:4px">${durationBadge}</div>
           <div style="margin-top:4px">${transcriptBadge}</div>
           <div style="margin-top:4px">${attendeesBadge}</div>
@@ -707,6 +715,120 @@ async function loadUserFilter() {
 taskSortBy.onchange = loadTasks;
 taskFilterUser.onchange = loadTasks;
 taskFilterStatus.onchange = loadTasks;
+
+async function editTaskContent(taskId, element) {
+  const currentText = element.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = currentText;
+  input.style.cssText = 'width:100%;padding:4px;border:1px solid #3b82f6;border-radius:4px';
+  element.replaceWith(input);
+  input.focus();
+  input.select();
+  
+  const save = async () => {
+    const newText = input.value.trim();
+    if (newText && newText !== currentText) {
+      try {
+        await callAPI(`/tasks/${taskId}/content`, 'PATCH', {content: newText});
+        await loadTasks();
+      } catch (e) {
+        alert('Failed to update task: ' + e.message);
+        await loadTasks();
+      }
+    } else {
+      await loadTasks();
+    }
+  };
+  
+  input.onblur = save;
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') loadTasks();
+  };
+}
+
+async function editMeetingTitle(meetingId, element) {
+  const currentText = element.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = currentText;
+  input.style.cssText = 'width:100%;padding:4px;border:1px solid #3b82f6;border-radius:4px;font-weight:600';
+  element.replaceWith(input);
+  input.focus();
+  input.select();
+  
+  const save = async () => {
+    const newText = input.value.trim();
+    if (newText && newText !== currentText) {
+      try {
+        await callAPI(`/meetings/${meetingId}/title`, 'PATCH', {title: newText});
+        await loadMeetings();
+      } catch (e) {
+        alert('Failed to update title: ' + e.message);
+        await loadMeetings();
+      }
+    } else {
+      await loadMeetings();
+    }
+  };
+  
+  input.onblur = save;
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') loadMeetings();
+  };
+}
+
+async function editMeetingDatetime(meetingId, currentDatetime, element) {
+  const input = document.createElement('input');
+  input.type = 'datetime-local';
+  input.value = currentDatetime;
+  input.style.cssText = 'width:100%;padding:4px;border:1px solid #3b82f6;border-radius:4px';
+  element.replaceWith(input);
+  input.focus();
+  
+  const save = async () => {
+    const newDatetime = input.value;
+    if (newDatetime && newDatetime !== currentDatetime) {
+      try {
+        await callAPI(`/meetings/${meetingId}/datetime`, 'PATCH', {datetime: newDatetime});
+        await loadMeetings();
+      } catch (e) {
+        alert('Failed to update datetime: ' + e.message);
+        await loadMeetings();
+      }
+    } else {
+      await loadMeetings();
+    }
+  };
+  
+  input.onblur = save;
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') save();
+    if (e.key === 'Escape') loadMeetings();
+  };
+}
+
+async function updateZoomLink(meetingId, currentLink) {
+  currentMeetingIdForZoomLink = meetingId;
+  zoomLinkInput.value = currentLink || '';
+  zoomLinkModal.classList.remove('hidden');
+}
+
+closeZoomLinkModal.onclick = () => {
+  zoomLinkModal.classList.add('hidden');
+};
+
+saveZoomLinkBtn.onclick = async () => {
+  try {
+    await callAPI(`/meetings/${currentMeetingIdForZoomLink}/zoom-link`, 'PATCH', {zoom_link: zoomLinkInput.value.trim()});
+    zoomLinkModal.classList.add('hidden');
+    await loadMeetings();
+  } catch (e) {
+    alert('Failed to update zoom link: ' + e.message);
+  }
+};
 
 if (token) {
   Promise.all([loadMessages(), loadFiles(), loadTasks(), loadMeetings(), loadUserFilter()]).then(()=>{

@@ -92,12 +92,13 @@ async def broadcast_message(session: AsyncSession, msg: Message):
         }
     })
 
-async def extract_and_save_tasks(session: AsyncSession, content: str, message_id: int):
-    """Extract and save tasks from a message."""
+async def extract_and_save_tasks(session: AsyncSession, content: str, message_id: int) -> bool:
+    """Extract and save tasks from a message. Returns True if tasks were added."""
     print(f"Extracting tasks from: {content}")
     tasks = await extract_tasks(content)
     print(f"Extracted {len(tasks)} tasks: {tasks}")
     if tasks:
+        task_names = []
         for task_data in tasks:
             if isinstance(task_data, dict):
                 task = Task(
@@ -107,14 +108,29 @@ async def extract_and_save_tasks(session: AsyncSession, content: str, message_id
                     due_date=task_data.get("due_date") if task_data.get("due_date") else None,
                     assigned_to=task_data.get("assigned_to") if task_data.get("assigned_to") else None
                 )
+                task_names.append(task.content)
                 print(f"Created task: {task.content}, due: {task.due_date}, assigned: {task.assigned_to}")
             else:
                 task = Task(content=task_data, extracted_from_message_id=message_id, status=TaskStatus.pending)
+                task_names.append(task_data)
             session.add(task)
         await session.commit()
         print("Tasks committed to database")
         await manager.broadcast({"type": "tasks_updated"})
         print("Broadcast tasks_updated event")
+        
+        # Send confirmation message
+        if len(task_names) == 1:
+            confirmation = f"✅ Added task: **{task_names[0]}**"
+        else:
+            confirmation = f"✅ Added {len(task_names)} tasks: " + ", ".join([f"**{t}**" for t in task_names])
+        bot_msg = Message(user_id=None, content=confirmation, is_bot=True)
+        session.add(bot_msg)
+        await session.commit()
+        await session.refresh(bot_msg)
+        await broadcast_message(session, bot_msg)
+        return True
+    return False
 
 async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_id: int) -> bool:
     """Detect meeting requests and auto-create meeting with extracted details. Returns True if handled."""
@@ -379,6 +395,10 @@ async def generate_login_summary(username: str, session: AsyncSession) -> str:
     )
     meetings = meetings_res.scalars().all()
     
+    # If no tasks, meetings, or recent messages, return simple welcome
+    if not user_tasks and not meetings and not messages:
+        return f"Welcome back, {username}!"
+    
     # Build context
     context = f"User {username} just logged in. Provide a brief welcome summary.\n\n"
     
@@ -402,13 +422,13 @@ async def generate_login_summary(username: str, session: AsyncSession) -> str:
         for m in meetings:
             context += f"- {m.title} at {m.datetime}\n"
     
-    prompt = f"{context}\n\nProvide ONLY a brief, friendly welcome message (2-3 sentences) summarizing key updates and reminders for {username}. Do not include any prefix like 'Here's a message' or 'Welcome message:'. Start directly with the greeting."
+    prompt = f"{context}\n\nProvide ONLY a brief, friendly welcome message (1-2 sentences) summarizing ONLY the actual items listed above. If there are no tasks or meetings for {username}, just mention the recent chat activity. Do not make up or hallucinate any notifications. Do not include any prefix like 'Here's a message' or 'Welcome message:'. Start directly with the greeting."
     
     try:
         summary = await chat_completion([{"role": "user", "content": prompt}])
         return summary
     except:
-        return f"Welcome back, {username}! Check your tasks and recent messages."
+        return f"Welcome back, {username}!"
 
 @app.post("/api/login")
 async def login(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
@@ -420,6 +440,7 @@ async def login(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
     
     # Generate login summary asynchronously
     async def send_summary():
+        await asyncio.sleep(1)  # Wait for WebSocket connection
         async with SessionLocal() as new_session:
             summary = await generate_login_summary(payload.username, new_session)
             # Remove any prefix like "Here's a brief welcome message for username:"
@@ -473,11 +494,12 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     
     # Always extract tasks and detect meetings from non-command messages FIRST
     meeting_handled = False
+    task_handled = False
     if not payload.content.startswith("/"):
-        await extract_and_save_tasks(session, payload.content, m.id)
+        task_handled = await extract_and_save_tasks(session, payload.content, m.id)
         meeting_handled = await detect_and_suggest_meeting(session, payload.content, u.id)
     
-    if should_respond and not meeting_handled:
+    if should_respond and not meeting_handled and not task_handled:
         # Add user message to conversation history (skip commands)
         if not payload.content.startswith("/"):
             conversation_chain.add_to_history("user", payload.content)
@@ -704,6 +726,16 @@ async def assign_task(task_id: int, payload: AssignPayload, username: str = Depe
     await manager.broadcast({"type": "tasks_updated"})
     return {"ok": True}
 
+@app.patch("/api/tasks/{task_id}/content")
+async def update_task_content(task_id: int, payload: MessagePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.content = payload.content
+    await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
+    return {"ok": True}
+
 @app.delete("/api/tasks/{task_id}")
 async def delete_task(task_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     task = await session.get(Task, task_id)
@@ -812,6 +844,45 @@ async def set_duration(meeting_id: int, payload: DurationPayload, username: str 
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
     meeting.duration_minutes = payload.duration_minutes
+    await session.commit()
+    await manager.broadcast({"type": "meetings_updated"})
+    return {"ok": True}
+
+class MeetingTitlePayload(BaseModel):
+    title: str
+
+@app.patch("/api/meetings/{meeting_id}/title")
+async def update_meeting_title(meeting_id: int, payload: MeetingTitlePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting.title = payload.title
+    await session.commit()
+    await manager.broadcast({"type": "meetings_updated"})
+    return {"ok": True}
+
+class MeetingDatetimePayload(BaseModel):
+    datetime: str
+
+@app.patch("/api/meetings/{meeting_id}/datetime")
+async def update_meeting_datetime(meeting_id: int, payload: MeetingDatetimePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting.datetime = payload.datetime
+    await session.commit()
+    await manager.broadcast({"type": "meetings_updated"})
+    return {"ok": True}
+
+class ZoomLinkPayload(BaseModel):
+    zoom_link: str
+
+@app.patch("/api/meetings/{meeting_id}/zoom-link")
+async def update_zoom_link(meeting_id: int, payload: ZoomLinkPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    meeting = await session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting.zoom_link = payload.zoom_link
     await session.commit()
     await manager.broadcast({"type": "meetings_updated"})
     return {"ok": True}
