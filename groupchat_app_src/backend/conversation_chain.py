@@ -38,7 +38,8 @@ class ConversationChain:
                 "content": (
                     "You are a helpful assistant in a group chat. Use the conversation history "
                     "and provided document context to give accurate, concise responses. "
-                    "Reference previous messages when relevant."
+                    "CRITICAL: Only reference information from the conversation history or provided documents. "
+                    "Never make up or hallucinate tasks, assignments, or information that isn't explicitly in the context."
                     f"{context}"
                 )
             }

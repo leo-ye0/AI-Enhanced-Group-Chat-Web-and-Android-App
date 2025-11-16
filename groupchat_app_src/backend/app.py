@@ -115,9 +115,10 @@ async def extract_and_save_tasks(session: AsyncSession, content: str, message_id
                 task_names.append(task_data)
             session.add(task)
         await session.commit()
+        await session.flush()
         print("Tasks committed to database")
         await manager.broadcast({"type": "tasks_updated"})
-        print("Broadcast tasks_updated event")
+        print(f"Broadcast tasks_updated event to {len(manager.active_connections)} connections")
         
         # Send confirmation message
         if len(task_names) == 1:
@@ -308,8 +309,12 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
 
 async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id: int = None):
     # Check for project commands
-    if content.strip().lower() == "/project analyze":
-        reply_text = await analyze_project()
+    if content.strip().lower().startswith("/project analyze"):
+        # Extract timeline info if provided
+        timeline_info = None
+        if len(content.strip()) > len("/project analyze"):
+            timeline_info = content.strip()[len("/project analyze"):].strip()
+        reply_text = await analyze_project(timeline_info)
     elif content.strip().lower() == "/project status":
         reply_text = await get_project_status()
     elif content.strip().lower() == "/tasks":
@@ -743,6 +748,7 @@ async def delete_task(task_id: int, username: str = Depends(get_current_user_tok
         raise HTTPException(status_code=404, detail="Task not found")
     await session.delete(task)
     await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
     return {"ok": True}
 
 class MeetingPayload(BaseModel):

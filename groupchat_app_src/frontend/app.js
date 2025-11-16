@@ -182,7 +182,10 @@ function connectWS() {
       const data = JSON.parse(ev.data);
       if (data.type === "message") addMessage(data.message);
       if (data.type === "clear") messagesDiv.innerHTML = "";
-      if (data.type === "tasks_updated") loadTasks();
+      if (data.type === "tasks_updated") {
+        console.log('Received tasks_updated event, reloading tasks...');
+        loadTasks();
+      }
       if (data.type === "meetings_updated") loadMeetings();
       if (data.type === "meeting_suggestion") showMeetingSuggestion(data.data);
       if (data.type === "open_meeting_modal") meetingModal.classList.remove('hidden');
@@ -378,7 +381,9 @@ toggleSummaries.onclick = () => {
 
 async function loadTasks() {
   try {
+    console.log('loadTasks() called');
     const data = await callAPI("/tasks");
+    console.log('Received tasks:', data.tasks.length);
     let tasks = data.tasks;
     
     // Filter by status
