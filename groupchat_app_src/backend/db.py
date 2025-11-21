@@ -70,6 +70,22 @@ class Meeting(Base):
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+class DecisionOption(enum.Enum):
+    A = "A"
+    B = "B"
+    C = "C"
+
+class Decision(Base):
+    """Dialectic Engine: Decision Log for conflict resolutions"""
+    __tablename__ = "decisions"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    conflict_id: Mapped[str] = mapped_column(String(255), index=True)
+    triggering_conflict: Mapped[str] = mapped_column(Text())
+    selected_option: Mapped[DecisionOption] = mapped_column(Enum(DecisionOption))
+    reasoning: Mapped[str] = mapped_column(Text())
+    decided_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 

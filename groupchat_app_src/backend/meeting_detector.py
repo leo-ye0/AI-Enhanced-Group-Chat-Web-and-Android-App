@@ -10,6 +10,13 @@ async def detect_meeting_request(message: str) -> dict:
     if not any(ind in message.lower() for ind in indicators):
         return None
     
+    # Extract Zoom link first using regex
+    import re
+    zoom_link = None
+    zoom_match = re.search(r'https?://[^\s]+', message, re.IGNORECASE)
+    if zoom_match:
+        zoom_link = zoom_match.group(0)
+    
     prompt = f"""Extract meeting details from this message. Extract EXACT usernames as they appear.
 
 Message: "{message}"
@@ -79,6 +86,7 @@ JSON:"""
                 "datetime": datetime_str,
                 "duration": result.get("duration"),
                 "attendees": attendees,
+                "zoom_link": zoom_link,
                 "suggested_times": result.get("suggested_times", "")
             }
             print(f"Returning meeting data: {meeting_data}")

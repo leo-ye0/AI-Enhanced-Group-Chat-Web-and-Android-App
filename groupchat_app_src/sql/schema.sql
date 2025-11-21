@@ -21,3 +21,16 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Dialectic Engine: Decision Log Table
+CREATE TABLE IF NOT EXISTS decisions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  conflict_id VARCHAR(255) NOT NULL,
+  triggering_conflict TEXT NOT NULL,
+  selected_option ENUM('A', 'B', 'C') NOT NULL,
+  reasoning TEXT NOT NULL,
+  decided_by INT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_decision_user FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE CASCADE,
+  INDEX idx_conflict_id (conflict_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

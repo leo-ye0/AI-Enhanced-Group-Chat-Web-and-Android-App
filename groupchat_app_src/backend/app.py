@@ -12,7 +12,7 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from dotenv import load_dotenv
 
-from db import SessionLocal, init_db, User, Message, UploadedFile, Task, TaskStatus, Meeting
+from db import SessionLocal, init_db, User, Message, UploadedFile, Task, TaskStatus, Meeting, Decision
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_token
 from websocket_manager import ConnectionManager
 from llm import chat_completion
@@ -24,6 +24,7 @@ from migrations import run_migrations
 from project_manager import analyze_project, get_project_status
 from task_extractor import extract_tasks
 from meeting_detector import detect_meeting_request, generate_zoom_link
+from dialectic_engine import monitor_message_for_conflicts, handle_decision_response, SocraticInterventionGenerator
 
 load_dotenv()
 
@@ -169,10 +170,10 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
         # Try to parse zoom link FIRST and remove it from content
         content_without_url = content
         if not meeting_data.get('zoom_link'):
-            zoom_match = re.search(r'https?://[^\s]+', content)
+            zoom_match = re.search(r'https?://[^\s]+', content, re.IGNORECASE)
             if zoom_match:
                 meeting_data['zoom_link'] = zoom_match.group(0)
-                content_without_url = content.replace(zoom_match.group(0), '')
+                content_without_url = content.replace(zoom_match.group(0), '').strip()
         
         # Try to parse duration (e.g., "60 minutes", "1 hour", "30min")
         duration_match = re.search(r'(\d+)\s*(?:min|minute|minutes|hour|hours|hrs?)', content_without_url, re.IGNORECASE)
@@ -181,6 +182,12 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
             if 'hour' in content_without_url.lower() or 'hr' in content_without_url.lower():
                 duration *= 60
             meeting_data['duration'] = duration
+        
+        # Try to parse meeting title
+        if not meeting_data.get('title') or meeting_data.get('title') == 'Team Meeting':
+            title_match = re.search(r'(?:meeting|call|discuss|review)\s+(?:about|for|on|regarding)?\s+([\w\s]+?)(?:\s+on|\s+at|\s+with|$)', content_without_url, re.IGNORECASE)
+            if title_match:
+                meeting_data['title'] = title_match.group(1).strip().title()
         
         # Try to parse attendees (usernames without @) from content WITHOUT URL
         if not meeting_data.get('attendees'):
@@ -191,7 +198,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
                 meeting_data['attendees'] = ','.join(usernames)
         
         # Check if we have all required info now
-        if meeting_data.get('datetime') and meeting_data.get('attendees') and meeting_data.get('duration') and meeting_data.get('zoom_link'):
+        has_title = meeting_data.get('title') and meeting_data.get('title') != 'Team Meeting'
+        if has_title and meeting_data.get('datetime') and meeting_data.get('attendees') and meeting_data.get('duration') and meeting_data.get('zoom_link'):
             waiting_for_meeting_info.pop(user_id)
             
             # Create meeting
@@ -223,6 +231,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
         else:
             # Still missing some info
             missing = []
+            if not meeting_data.get('title') or meeting_data.get('title') == 'Team Meeting':
+                missing.append('meeting name/title')
             if not meeting_data.get('datetime'):
                 missing.append('date/time (YYYY-MM-DD, HH:MM)')
             if not meeting_data.get('attendees'):
@@ -250,6 +260,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
     if meeting_info:
         # Check what info is missing
         missing = []
+        if not meeting_info.get("title") or meeting_info.get("title") == "Team Meeting":
+            missing.append("meeting name/title")
         if not meeting_info.get("datetime"):
             missing.append("date/time (YYYY-MM-DD, HH:MM)")
         if not meeting_info.get("attendees"):
@@ -490,6 +502,28 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     await session.commit()
     await session.refresh(m)
     await broadcast_message(session, m)
+    
+    # DIALECTIC ENGINE: Check for decision responses FIRST
+    if "@bot decision" in payload.content.lower():
+        decision_response = await handle_decision_response(payload.content, u.id, session)
+        if decision_response:
+            bot_msg = Message(user_id=None, content=decision_response, is_bot=True)
+            session.add(bot_msg)
+            await session.commit()
+            await session.refresh(bot_msg)
+            await broadcast_message(session, bot_msg)
+            return {"ok": True, "id": m.id}
+    
+    # DIALECTIC ENGINE: Silent monitoring for conflicts
+    conflict = await monitor_message_for_conflicts(payload.content, m.id)
+    if conflict:
+        intervention = await SocraticInterventionGenerator.generate_intervention(conflict)
+        bot_msg = Message(user_id=None, content=intervention, is_bot=True)
+        session.add(bot_msg)
+        await session.commit()
+        await session.refresh(bot_msg)
+        await broadcast_message(session, bot_msg)
+        return {"ok": True, "id": m.id}
     
     # Check if bot should respond (commands or @bot mentions)
     should_respond = (
@@ -902,6 +936,42 @@ async def delete_meeting(meeting_id: int, username: str = Depends(get_current_us
     await session.commit()
     await manager.broadcast({"type": "meetings_updated"})
     return {"ok": True}
+
+# --------- Dialectic Engine Routes ---------
+@app.get("/api/decisions")
+async def get_decisions(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get all logged decisions."""
+    decisions_res = await session.execute(select(Decision).order_by(desc(Decision.created_at)))
+    decisions = decisions_res.scalars().all()
+    result = []
+    for d in decisions:
+        user_obj = await session.get(User, d.decided_by)
+        result.append({
+            "id": d.id,
+            "conflict_id": d.conflict_id,
+            "selected_option": d.selected_option.value,
+            "reasoning": d.reasoning,
+            "decided_by": user_obj.username if user_obj else "unknown",
+            "created_at": str(d.created_at)
+        })
+    return {"decisions": result}
+
+@app.get("/api/decisions/{conflict_id}")
+async def get_decision_by_conflict(conflict_id: str, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get decision for specific conflict."""
+    decision_res = await session.execute(select(Decision).where(Decision.conflict_id == conflict_id))
+    decision = decision_res.scalar_one_or_none()
+    if not decision:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    user_obj = await session.get(User, decision.decided_by)
+    return {
+        "id": decision.id,
+        "conflict_id": decision.conflict_id,
+        "selected_option": decision.selected_option.value,
+        "reasoning": decision.reasoning,
+        "decided_by": user_obj.username if user_obj else "unknown",
+        "created_at": str(decision.created_at)
+    }
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
