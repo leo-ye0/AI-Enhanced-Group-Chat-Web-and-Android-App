@@ -7,6 +7,13 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- Left Navbar -->
+  <nav class="left-nav hidden" id="leftNav">
+    <div class="nav-item active">🏠 Home</div>
+    <div class="nav-item">💬 Groups</div>
+    <div class="nav-item">📨 Direct Msgs</div>
+  </nav>
+
   <div class="container">
     <div class="auth" id="auth">
       <h1>StudyPal Chat</h1>
@@ -49,6 +56,49 @@
       </div>
       <div class="preview-content" id="previewContent"></div>
     </div>
+    <!-- Right Context Sidebar -->
+    <div class="right-sidebar hidden" id="rightSidebar">
+      <div class="sidebar-section">
+        <h3>🎯 PROJECT PULSE</h3>
+        <div class="pulse-content">
+          <div>Phase 2: Research</div>
+          <div class="progress-bar"><div class="progress" style="width:65%"></div></div>
+          <div style="font-size:11px;margin-top:4px">65% Complete</div>
+          <div class="pulse-deadline">⚠️ Deadline: Nov 30 (9 Days)</div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0">📅 MEETINGS</h3>
+          <button id="expandMeetings" class="toggle-btn">All</button>
+        </div>
+        <div id="sidebarMeetings" class="sidebar-meetings"></div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="tab-header">
+          <div class="tab active" id="tasksTab">TASKS</div>
+          <div class="tab" id="decisionsTab">DECISIONS</div>
+        </div>
+        <div class="tab-content" id="tasksContent">
+          <div id="sidebarTasks" class="sidebar-tasks"></div>
+          <button id="addTaskBtnSidebar" class="add-btn">+ Add</button>
+        </div>
+        <div class="tab-content hidden" id="decisionsContent">
+          <div id="sidebarDecisions" class="sidebar-decisions"></div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 style="margin:0">📂 GROUP BRAIN</h3>
+          <button id="toggleBrainSummaries" class="toggle-btn">Hide</button>
+        </div>
+        <div id="groupBrain" class="brain-list"></div>
+      </div>
+    </div>
+
     <div class="right-column hidden" id="rightColumn">
       <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
@@ -174,6 +224,10 @@
           <input id="meetingZoomLink" placeholder="Paste your Zoom link (e.g., https://zoom.us/j/123456789)">
           <div style="font-size:11px;opacity:0.7;margin-top:4px">
             📍 Get your personal Zoom link: <a href="https://zoom.us/profile" target="_blank" style="color:#4f46e5">zoom.us/profile</a> → Personal Meeting ID
+          </div>
+          <div style="margin-top:8px;position:relative">
+            <button id="attendeeDropdownBtn" type="button" style="width:100%;padding:8px;border:1px solid #374151;border-radius:8px;background:#0b1220;color:#e2e8f0;text-align:left;cursor:pointer;font-size:12px">👥 Select Attendees</button>
+            <div id="meetingAttendeeCheckboxes" class="hidden" style="position:absolute;top:100%;left:0;right:0;max-height:150px;overflow-y:auto;background:#0b1220;border:1px solid #374151;border-radius:8px;margin-top:2px;padding:8px;z-index:1000;box-shadow:0 4px 12px rgba(0,0,0,0.3)"></div>
           </div>
           <button id="uploadTranscriptBtn" class="toggle-btn" style="width:100%;margin-top:8px;display:none">📄 Upload Transcript</button>
           <div id="suggestedTimes" class="suggested-times"></div>

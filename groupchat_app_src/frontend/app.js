@@ -87,7 +87,44 @@ function showAuth() {
 function showChat() {
   authPanel.classList.add("hidden");
   chatPanel.classList.remove("hidden");
-  $("rightColumn").classList.remove("hidden");
+  $("leftNav").classList.remove("hidden");
+  $("rightSidebar").classList.remove("hidden");
+  loadDecisions();
+  loadGroupBrain();
+  loadSidebarTasks();
+  loadNextMeeting();
+  
+  setTimeout(() => {
+    if ($("expandMeetings")) {
+      $("expandMeetings").onclick = () => {
+        meetingsExpanded = !meetingsExpanded;
+        $("expandMeetings").textContent = meetingsExpanded ? 'Less' : 'All';
+        loadNextMeeting();
+      };
+    }
+    if ($("tasksTab")) {
+      $("tasksTab").onclick = () => {
+        $("tasksTab").classList.add('active');
+        $("decisionsTab").classList.remove('active');
+        $("tasksContent").classList.remove('hidden');
+        $("decisionsContent").classList.add('hidden');
+      };
+    }
+    if ($("decisionsTab")) {
+      $("decisionsTab").onclick = () => {
+        $("decisionsTab").classList.add('active');
+        $("tasksTab").classList.remove('active');
+        $("decisionsContent").classList.remove('hidden');
+        $("tasksContent").classList.add('hidden');
+      };
+    }
+    if ($("addTaskBtnSidebar")) {
+      $("addTaskBtnSidebar").onclick = () => {
+        taskInput.classList.remove('hidden');
+        newTaskContent.focus();
+      };
+    }
+  }, 100);
 }
 
 async function callAPI(path, method = "GET", body) {
@@ -185,8 +222,13 @@ function connectWS() {
       if (data.type === "tasks_updated") {
         console.log('Received tasks_updated event, reloading tasks...');
         loadTasks();
+        loadSidebarTasks();
       }
-      if (data.type === "meetings_updated") loadMeetings();
+      if (data.type === "meetings_updated") {
+        console.log('Received meetings_updated event, reloading meetings...');
+        loadMeetings();
+        loadNextMeeting();
+      }
       if (data.type === "meeting_suggestion") showMeetingSuggestion(data.data);
       if (data.type === "open_meeting_modal") meetingModal.classList.remove('hidden');
       if (data.type === "open_assign_modal") openAssignModal(data.task_id, '');
@@ -240,9 +282,236 @@ logoutBtn.onclick = () => {
     ws.close();
     ws = null;
   }
-  $("rightColumn").classList.add("hidden");
+  $("leftNav").classList.add("hidden");
+  $("rightSidebar").classList.add("hidden");
   showAuth();
 };
+
+async function loadDecisions() {
+  try {
+    const data = await callAPI("/decisions");
+    const log = $("sidebarDecisions");
+    if (!log) return;
+    log.innerHTML = "";
+    if (data.decisions.length === 0) {
+      log.innerHTML = '<div class="no-decisions">No decisions yet</div>';
+    } else {
+      data.decisions.slice(0, 5).forEach(d => {
+        const el = document.createElement("div");
+        el.className = "sidebar-decision";
+        el.innerHTML = `<strong>Option ${d.selected_option}</strong><br><small>${d.reasoning.substring(0, 40)}...</small>`;
+        log.appendChild(el);
+      });
+    }
+  } catch (e) {
+    console.error("Failed to load decisions:", e);
+  }
+}
+
+async function loadSidebarTasks() {
+  try {
+    const data = await callAPI("/tasks");
+    const tasks = data.tasks.filter(t => t.status === 'pending').slice(0, 5);
+    const list = $("sidebarTasks");
+    if (!list) return;
+    list.innerHTML = "";
+    if (tasks.length === 0) {
+      list.innerHTML = '<div class="no-decisions">No pending tasks</div>';
+    } else {
+      tasks.forEach(t => {
+        const el = document.createElement("div");
+        el.className = "sidebar-task";
+        const assignees = t.assigned_to ? t.assigned_to.split(',').map(a => `@${a.trim()}`).join(', ') : '';
+        const due = t.due_date ? `(Due ${t.due_date})` : '';
+        el.innerHTML = `⬜ ${assignees ? assignees + ': ' : ''}${t.content.substring(0, 30)}... ${due}`;
+        list.appendChild(el);
+      });
+    }
+  } catch (e) {
+    console.error("Failed to load sidebar tasks:", e);
+  }
+}
+
+let meetingsExpanded = false;
+
+async function loadNextMeeting() {
+  try {
+    const data = await callAPI("/meetings");
+    const now = new Date();
+    const upcoming = data.meetings.filter(m => new Date(m.datetime) > now).sort((a,b) => new Date(a.datetime) - new Date(b.datetime));
+    const container = $("sidebarMeetings");
+    if (!container) return;
+    container.innerHTML = "";
+    if (upcoming.length === 0) {
+      container.innerHTML = '<div class="no-decisions">No upcoming meetings</div>';
+    } else {
+      const toShow = meetingsExpanded ? upcoming : upcoming.slice(0, 3);
+      toShow.forEach(m => {
+        const el = document.createElement("div");
+        el.className = "sidebar-meeting";
+        const dt = new Date(m.datetime);
+        const day = dt.toLocaleDateString([], {month: 'short', day: 'numeric'});
+        const time = dt.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+        const attendeeList = m.attendees ? m.attendees.split(',').map(a => a.trim()) : [];
+        const attendees = attendeeList.length > 2 ? `@${attendeeList[0]}, @${attendeeList[1]} +${attendeeList.length - 2}` : attendeeList.map(a => `@${a}`).join(', ');
+        el.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:start">
+            <div style="flex:1;cursor:pointer" onclick="window.open('${m.zoom_link}', '_blank')">
+              <div style="font-weight:600">${m.title}</div>
+              <div style="font-size:10px;margin-top:2px">${time} (${day})</div>
+              ${attendees ? `<div style="font-size:10px;margin-top:2px;opacity:0.8">${attendees}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:2px">
+              <button class="task-complete" onclick="editMeetingSidebar(${m.id})" style="padding:2px 6px;font-size:10px">✏️</button>
+              <button class="task-delete" onclick="deleteMeetingSidebar(${m.id})" style="padding:2px 6px;font-size:10px">×</button>
+            </div>
+          </div>
+        `;
+        container.appendChild(el);
+      });
+    }
+  } catch (e) {
+    console.error("Failed to load meetings:", e);
+  }
+}
+
+async function editMeetingSidebar(meetingId) {
+  try {
+    const data = await callAPI("/meetings");
+    const meeting = data.meetings.find(m => m.id === meetingId);
+    if (!meeting) return;
+    await populateMeetingAttendees();
+    meetingTitle.value = meeting.title;
+    meetingDatetime.value = meeting.datetime;
+    meetingDuration.value = meeting.duration_minutes;
+    meetingZoomLink.value = meeting.zoom_link;
+    const attendeeList = meeting.attendees ? meeting.attendees.split(',').map(a => a.trim()) : [];
+    document.querySelectorAll('#meetingAttendeeCheckboxes input[type="checkbox"]').forEach(cb => {
+      cb.checked = attendeeList.includes(cb.value);
+    });
+    updateAttendeeButtonText();
+    currentMeetingId = meetingId;
+    createMeetingBtn.textContent = 'Update Meeting';
+    createMeetingBtn.onclick = async () => {
+      if (!confirm('Do you want to save the changes?')) return;
+      const selectedAttendees = Array.from(document.querySelectorAll('#meetingAttendeeCheckboxes input[type="checkbox"]:checked')).map(cb => cb.value).join(',');
+      await callAPI(`/meetings/${meetingId}/title`, 'PATCH', {title: meetingTitle.value});
+      await callAPI(`/meetings/${meetingId}/datetime`, 'PATCH', {datetime: meetingDatetime.value});
+      await callAPI(`/meetings/${meetingId}/duration`, 'PATCH', {duration_minutes: parseInt(meetingDuration.value)});
+      await callAPI(`/meetings/${meetingId}/zoom-link`, 'PATCH', {zoom_link: meetingZoomLink.value});
+      await callAPI(`/meetings/${meetingId}/attendees`, 'PATCH', {usernames: selectedAttendees});
+      meetingModal.classList.add('hidden');
+      meetingTitle.value = '';
+      meetingDatetime.value = '';
+      meetingZoomLink.value = '';
+      meetingDuration.value = '30';
+      createMeetingBtn.textContent = 'Create Meeting';
+      currentMeetingId = null;
+      await loadMeetings();
+      await loadNextMeeting();
+    };
+    meetingModal.classList.remove('hidden');
+  } catch (e) {
+    alert('Failed to edit meeting: ' + e.message);
+  }
+}
+
+async function deleteMeetingSidebar(meetingId) {
+  if (!confirm('Delete this meeting?')) return;
+  try {
+    await callAPI(`/meetings/${meetingId}`, 'DELETE');
+    await loadNextMeeting();
+    await loadMeetings();
+  } catch (e) {
+    alert('Failed to delete meeting: ' + e.message);
+  }
+}
+
+async function populateMeetingAttendees() {
+  try {
+    const data = await callAPI("/users");
+    const container = $("meetingAttendeeCheckboxes");
+    if (!container) return;
+    container.innerHTML = "";
+    data.users.forEach(u => {
+      const label = document.createElement("label");
+      label.style.cssText = "display:flex;align-items:center;padding:4px 0;gap:6px;cursor:pointer;justify-content:flex-start";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = u.username;
+      checkbox.style.cssText = "margin:0;width:auto;flex-shrink:0";
+      const span = document.createElement("span");
+      span.textContent = u.username;
+      span.style.cssText = "font-size:11px;text-align:left";
+      label.appendChild(checkbox);
+      label.appendChild(span);
+      container.appendChild(label);
+    });
+  } catch (e) {
+    console.error("Failed to load users:", e);
+  }
+}
+
+function updateAttendeeButtonText() {
+  const selected = document.querySelectorAll('#meetingAttendeeCheckboxes input[type="checkbox"]:checked');
+  const btn = $("attendeeDropdownBtn");
+  if (btn) {
+    btn.textContent = selected.length > 0 ? `👥 ${selected.length} Selected` : '👥 Select Attendees';
+  }
+}
+
+let brainSummariesVisible = true;
+
+async function loadGroupBrain() {
+  try {
+    const data = await callAPI("/files");
+    const brain = $("groupBrain");
+    brain.innerHTML = "";
+    if (data.files.length === 0) {
+      brain.innerHTML = '<div class="no-files">No files uploaded</div>';
+    } else {
+      data.files.forEach(f => {
+        const el = document.createElement("div");
+        el.className = "brain-file";
+        el.style.flexDirection = "column";
+        el.style.alignItems = "flex-start";
+        el.innerHTML = `
+          <div style="display:flex;align-items:center;gap:6px;width:100%">
+            <span style="cursor:pointer;flex:1" onclick="openFileInNewWindow(${f.id}, '${f.filename}')">📂 ${f.filename}</span>
+            <button class="task-delete" onclick="deleteBrainFile(${f.id})" style="padding:2px 6px;font-size:10px">×</button>
+          </div>
+          <div class="brain-summary" style="font-size:10px;opacity:0.7;margin-top:4px;line-height:1.3;display:${brainSummariesVisible ? 'block' : 'none'}">${f.summary || 'No summary'}</div>
+        `;
+        brain.appendChild(el);
+      });
+    }
+  } catch (e) {
+    console.error("Failed to load group brain:", e);
+  }
+}
+
+async function deleteBrainFile(fileId) {
+  if (!confirm('Delete this file?')) return;
+  try {
+    await callAPI(`/files/delete/${fileId}`, 'DELETE');
+    await loadGroupBrain();
+    await loadFiles();
+  } catch (e) {
+    alert('Failed to delete file: ' + e.message);
+  }
+}
+
+setTimeout(() => {
+  if ($("toggleBrainSummaries")) {
+    $("toggleBrainSummaries").onclick = () => {
+      brainSummariesVisible = !brainSummariesVisible;
+      $("toggleBrainSummaries").textContent = brainSummariesVisible ? 'Hide' : 'Show';
+      document.querySelectorAll('.brain-summary').forEach(s => {
+        s.style.display = brainSummariesVisible ? 'block' : 'none';
+      });
+    };
+  }
+}, 100);
 
 chatInput.oninput = (e) => {
   const text = e.target.value;
@@ -345,6 +614,7 @@ fileInput.onchange = async (e) => {
     const result = await response.json();
     alert(`File uploaded successfully! Processed ${result.chunks} chunks.`);
     await loadFiles();
+    await loadGroupBrain();
     
     // Check for summary updates every 3 seconds for 30 seconds
     let checkCount = 0;
@@ -355,6 +625,7 @@ fileInput.onchange = async (e) => {
         return;
       }
       await loadFiles();
+      await loadGroupBrain();
     }, 3000);
   } catch (e) {
     alert('Upload failed: ' + e.message);
@@ -541,7 +812,7 @@ async function loadMeetings() {
         const formattedTime = meeting.datetime.replace('T', ' ');
         const transcriptBadge = meeting.transcript_filename ? `<span style="font-size:10px;color:#10b981">📄 ${meeting.transcript_filename}</span>` : `<button class="task-complete" onclick="uploadTranscript(${meeting.id})" style="font-size:10px">+ Transcript</button>`;
         const attendees = meeting.attendees ? meeting.attendees.split(',').map(u => u.trim()) : [];
-        const attendeesBadge = attendees.length > 0 ? `<span style="font-size:10px;color:#10b981;cursor:pointer" onclick="openAttendeesModal(${meeting.id}, '${meeting.attendees}')">👥 ${attendees[0]}${attendees.length > 1 ? ` +${attendees.length - 1}` : ''}</span>` : `<button class="task-complete" onclick="openAttendeesModal(${meeting.id}, '')" style="font-size:10px">+ Attendees</button>`;
+        const attendeesBadge = attendees.length > 2 ? `<span style="font-size:10px;color:#10b981;cursor:pointer" onclick="openAttendeesModal(${meeting.id}, '${meeting.attendees}')">👥 ${attendees[0]}, ${attendees[1]} +${attendees.length - 2}</span>` : attendees.length > 0 ? `<span style="font-size:10px;color:#10b981;cursor:pointer" onclick="openAttendeesModal(${meeting.id}, '${meeting.attendees}')">👥 ${attendees.join(', ')}</span>` : `<button class="task-complete" onclick="openAttendeesModal(${meeting.id}, '')" style="font-size:10px">+ Attendees</button>`;
         const durationBadge = `<span style="font-size:10px;color:#f59e0b;cursor:pointer" onclick="setMeetingDuration(${meeting.id}, ${meeting.duration_minutes})">⏱️ ${meeting.duration_minutes}min</span>`;
         meetingEl.innerHTML = `
           <div style="display:flex;justify-content:space-between;align-items:flex-start">
@@ -627,6 +898,13 @@ function showMeetingSuggestion(data) {
 
 closeMeetingModal.onclick = () => {
   meetingModal.classList.add('hidden');
+  $("meetingAttendeeCheckboxes").classList.add('hidden');
+  meetingTitle.value = '';
+  meetingDatetime.value = '';
+  meetingZoomLink.value = '';
+  meetingDuration.value = '30';
+  createMeetingBtn.textContent = 'Create Meeting';
+  currentMeetingId = null;
 };
 
 transcriptInput.onchange = async (e) => {
@@ -655,11 +933,32 @@ transcriptInput.onchange = async (e) => {
   }
 };
 
-addMeetingBtn.onclick = () => {
+addMeetingBtn.onclick = async () => {
+  await populateMeetingAttendees();
   meetingModal.classList.remove('hidden');
 };
 
+setTimeout(() => {
+  const dropdownBtn = $("attendeeDropdownBtn");
+  const dropdown = $("meetingAttendeeCheckboxes");
+  if (dropdownBtn && dropdown) {
+    dropdownBtn.onclick = (e) => {
+      e.stopPropagation();
+      dropdown.classList.toggle('hidden');
+    };
+    document.addEventListener('click', (e) => {
+      if (!dropdown.contains(e.target) && e.target !== dropdownBtn) {
+        dropdown.classList.add('hidden');
+      }
+    });
+    dropdown.addEventListener('change', updateAttendeeButtonText);
+  }
+}, 100);
+
 createMeetingBtn.onclick = async () => {
+  if (currentMeetingId && createMeetingBtn.textContent === 'Update Meeting') {
+    return;
+  }
   const title = meetingTitle.value.trim();
   const datetime = meetingDatetime.value;
   const duration = parseInt(meetingDuration.value);
@@ -675,6 +974,12 @@ createMeetingBtn.onclick = async () => {
   try {
     const result = await callAPI('/meetings', 'POST', {title, datetime, duration_minutes: duration, zoom_link});
     currentMeetingId = result.id;
+    
+    const selectedAttendees = Array.from($("meetingAttendeeCheckboxes").querySelectorAll('input:checked')).map(cb => cb.value);
+    if (selectedAttendees.length > 0) {
+      await callAPI(`/meetings/${result.id}/attendees`, 'PATCH', {usernames: selectedAttendees.join(',')});
+    }
+    
     uploadTranscriptBtn.style.display = 'block';
     createMeetingBtn.textContent = 'Done';
     createMeetingBtn.onclick = () => {
@@ -689,6 +994,7 @@ createMeetingBtn.onclick = async () => {
       currentMeetingId = null;
     };
     await loadMeetings();
+    await loadNextMeeting();
   } catch (e) {
     alert('Failed to create meeting: ' + e.message);
   }
