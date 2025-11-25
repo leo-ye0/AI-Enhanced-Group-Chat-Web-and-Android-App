@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>StudyPal Chat</title>
+  <title>OmniPal Chat</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -16,7 +16,7 @@
 
   <div class="container">
     <div class="auth" id="auth">
-      <h1>StudyPal Chat</h1>
+      <h1>OmniPal Chat</h1>
       <p>Create an account or log in to join the chat.</p>
       <div class="row">
         <input id="username" placeholder="Username">
@@ -31,7 +31,7 @@
     </div>
     <div class="chat hidden" id="chat">
       <div class="header">
-        <h2>StudyPal Chat</h2>
+        <h2>OmniPal Chat</h2>
         <div class="header-buttons">
           <input type="file" id="fileInput" accept=".pdf,.docx,.txt" style="display: none;">
           <button id="uploadBtn">Upload File</button>
@@ -59,43 +59,57 @@
     <!-- Right Context Sidebar -->
     <div class="right-sidebar hidden" id="rightSidebar">
       <div class="sidebar-section">
-        <h3>🎯 PROJECT PULSE</h3>
-        <div class="pulse-content">
-          <div>Phase 2: Research</div>
-          <div class="progress-bar"><div class="progress" style="width:65%"></div></div>
-          <div style="font-size:11px;margin-top:4px">65% Complete</div>
-          <div class="pulse-deadline">⚠️ Deadline: Nov 30 (9 Days)</div>
+        <h3 onclick="toggleSection('projectPulse')" style="cursor:pointer;user-select:none">🎯 PROJECT PULSE</h3>
+        <div id="projectPulse" style="display:none;flex-direction:column;gap:8px"></div>
+      </div>
+
+      <div class="sidebar-section">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <h3 onclick="toggleSection('sidebarMeetings')" style="margin:0;cursor:pointer;user-select:none">📅 MEETINGS</h3>
+          <div style="display:flex;gap:4px">
+            <button id="addMeetingSidebar" class="toggle-btn">+</button>
+            <button id="expandMeetings" class="toggle-btn">All</button>
+          </div>
+        </div>
+        <div id="sidebarMeetings" class="sidebar-meetings" style="display:none"></div>
+      </div>
+
+      <div class="sidebar-section">
+        <h3 onclick="toggleSection('tasksDecisionsContent')" style="cursor:pointer;user-select:none">📋 TASKS & DECISIONS</h3>
+        <div id="tasksDecisionsContent" style="display:none">
+          <div class="tab-header">
+            <div class="tab active" id="tasksTab">TASKS</div>
+            <div class="tab" id="decisionsTab">DECISIONS</div>
+          </div>
+          <div class="tab-content" id="tasksContent">
+            <div id="sidebarTasks" class="sidebar-tasks"></div>
+            <button id="addTaskBtnSidebar" class="add-btn">+ Add</button>
+          </div>
+          <div class="tab-content hidden" id="decisionsContent">
+            <div id="sidebarDecisions" class="sidebar-decisions"></div>
+            <button onclick="clearDecisions()" class="add-btn" style="background:#dc2626;margin-top:8px">🗑️ Clear</button>
+          </div>
         </div>
       </div>
 
       <div class="sidebar-section">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <h3 style="margin:0">📅 MEETINGS</h3>
-          <button id="expandMeetings" class="toggle-btn">All</button>
+          <h3 onclick="toggleSection('activeConflicts')" style="margin:0;cursor:pointer;user-select:none">🗳️ ACTIVE VOTES</h3>
+          <button onclick="startManualVote()" class="toggle-btn" style="font-size:10px">+ Vote</button>
         </div>
-        <div id="sidebarMeetings" class="sidebar-meetings"></div>
-      </div>
-
-      <div class="sidebar-section">
-        <div class="tab-header">
-          <div class="tab active" id="tasksTab">TASKS</div>
-          <div class="tab" id="decisionsTab">DECISIONS</div>
-        </div>
-        <div class="tab-content" id="tasksContent">
-          <div id="sidebarTasks" class="sidebar-tasks"></div>
-          <button id="addTaskBtnSidebar" class="add-btn">+ Add</button>
-        </div>
-        <div class="tab-content hidden" id="decisionsContent">
-          <div id="sidebarDecisions" class="sidebar-decisions"></div>
-        </div>
+        <div id="activeConflicts" class="active-conflicts" style="display:none"></div>
       </div>
 
       <div class="sidebar-section">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-          <h3 style="margin:0">📂 GROUP BRAIN</h3>
-          <button id="toggleBrainSummaries" class="toggle-btn">Hide</button>
+          <h3 onclick="toggleSection('groupBrain')" style="margin:0;cursor:pointer;user-select:none">📂 GROUP BRAIN</h3>
+          <div style="display:flex;gap:4px">
+            <button onclick="document.getElementById('brainFileInput').click()" class="toggle-btn" style="font-size:10px">⬆️ Upload</button>
+            <button id="toggleBrainSummaries" class="toggle-btn">Hide</button>
+          </div>
         </div>
-        <div id="groupBrain" class="brain-list"></div>
+        <input type="file" id="brainFileInput" accept=".pdf,.docx,.txt" style="display:none">
+        <div id="groupBrain" class="brain-list" style="display:none"></div>
       </div>
     </div>
 
@@ -232,6 +246,59 @@
           <button id="uploadTranscriptBtn" class="toggle-btn" style="width:100%;margin-top:8px;display:none">📄 Upload Transcript</button>
           <div id="suggestedTimes" class="suggested-times"></div>
           <button id="createMeetingBtn" class="toggle-btn" style="width:100%;margin-top:8px">Create Meeting</button>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="milestoneModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>✏️ Edit Milestone</h3>
+          <button id="closeMilestoneModal">×</button>
+        </div>
+        <div class="modal-body">
+          <input id="milestoneTitle" placeholder="Milestone title">
+          <input id="milestoneStartDate" type="date">
+          <input id="milestoneEndDate" type="date">
+          <button id="saveMilestoneBtn" class="toggle-btn" style="width:100%;margin-top:8px">Save Changes</button>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="voteModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="voteModalTitle">🗳️ Cast Your Vote</h3>
+          <button onclick="closeVoteModal()">×</button>
+        </div>
+        <div class="modal-body">
+          <textarea id="voteReasoning" placeholder="Please provide your reasoning for this vote..." style="width:100%;height:80px;padding:8px;border:1px solid #374151;border-radius:4px;background:#0b1220;color:#e2e8f0;resize:vertical"></textarea>
+          <button onclick="submitVote()" class="toggle-btn" style="width:100%;margin-top:8px">Submit Vote</button>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="startVoteModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>🗳️ Start Team Vote</h3>
+          <button onclick="closeStartVoteModal()">×</button>
+        </div>
+        <div class="modal-body">
+          <textarea id="startVoteQuestion" placeholder="What should the team vote on?\n\nExample: Should we use Method A or Method B for the analysis?" style="width:100%;height:80px;padding:8px;border:1px solid #374151;border-radius:4px;background:#0b1220;color:#e2e8f0;resize:vertical"></textarea>
+          <button onclick="submitStartVote()" class="toggle-btn" style="width:100%;margin-top:8px">Start Vote</button>
+        </div>
+      </div>
+    </div>
+    <div class="meeting-modal hidden" id="clearMilestonesModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>🗑️ Clear All Milestones</h3>
+          <button onclick="closeClearMilestonesModal()">×</button>
+        </div>
+        <div class="modal-body">
+          <p style="margin-bottom:16px;color:#e2e8f0">Are you sure you want to delete all milestones? This action cannot be undone.</p>
+          <div style="display:flex;gap:8px">
+            <button onclick="closeClearMilestonesModal()" class="toggle-btn" style="flex:1;background:#374151">Cancel</button>
+            <button onclick="confirmClearMilestones()" class="toggle-btn" style="flex:1;background:#dc2626">Delete All</button>
+          </div>
         </div>
       </div>
     </div>

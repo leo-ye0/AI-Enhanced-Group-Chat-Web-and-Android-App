@@ -2,7 +2,7 @@ import os
 import asyncio
 import time
 import uuid
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,26 +12,30 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from dotenv import load_dotenv
 
-from db import SessionLocal, init_db, User, Message, UploadedFile, Task, TaskStatus, Meeting, Decision
+from db import SessionLocal, init_db, User, Message, UploadedFile, Task, TaskStatus, Meeting, ProjectSettings, Decision, Milestone, ProjectSettings, DecisionLog, DecisionCategory, DecisionType, ActiveConflict, ConflictVote
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_token
 from websocket_manager import ConnectionManager
 from llm import chat_completion
 from file_processor import extract_text_from_pdf, extract_text_from_docx, chunk_text
-from vector_db import add_documents, search_documents, delete_documents_by_file_id
+from vector_db import add_documents, search_documents, delete_documents_by_file_id, collection
 from conversation_chain import conversation_chain, clear_conversation_history
+from chat_compactor import compact_chat_history, should_compact_history
 from summarizer import generate_summary
 from migrations import run_migrations
 from project_manager import analyze_project, get_project_status
 from task_extractor import extract_tasks
 from meeting_detector import detect_meeting_request, generate_zoom_link
-from dialectic_engine import monitor_message_for_conflicts, handle_decision_response, SocraticInterventionGenerator
+from dialectic_engine import monitor_message_for_conflicts, process_vote_command, SocraticInterventionGenerator
+from project_pulse import calculate_project_pulse
+from milestone_suggester import suggest_milestones
+from milestone_manager import detect_milestone_changes
 
 load_dotenv()
 
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 APP_PORT = int(os.getenv("APP_PORT", "8000"))
 
-app = FastAPI(title="StudyPal Chat")
+app = FastAPI(title="OmniPal Chat")
 
 # Allow same-origin and dev origins by default
 app.add_middleware(
@@ -67,14 +71,30 @@ async def get_db() -> AsyncSession:
 async def generate_and_update_summary(file_id: int, text: str, filename: str):
     """Generate summary and update database asynchronously."""
     try:
+        print(f"Starting summary generation for file {file_id}: {filename}")
         summary = await generate_summary(text, filename)
+        print(f"Summary generated for file {file_id}, length: {len(summary)}")
+        
         async with SessionLocal() as session:
             file_obj = await session.get(UploadedFile, file_id)
             if file_obj:
                 file_obj.summary = summary
                 await session.commit()
+                print(f"Summary saved to database for file {file_id}")
+                await manager.broadcast({"type": "file_summary_updated", "file_id": file_id})
+            else:
+                print(f"File {file_id} not found in database")
     except Exception as e:
         print(f"Summary generation failed for file {file_id}: {e}")
+        try:
+            async with SessionLocal() as session:
+                file_obj = await session.get(UploadedFile, file_id)
+                if file_obj:
+                    file_obj.summary = f"Summary generation failed: {str(e)}"
+                    await session.commit()
+                    await manager.broadcast({"type": "file_summary_updated", "file_id": file_id})
+        except:
+            pass
 
 async def broadcast_message(session: AsyncSession, msg: Message):
     # Load username
@@ -319,9 +339,190 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
         return True
     return False
 
-async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id: int = None):
-    # Check for project commands
-    if content.strip().lower().startswith("/project analyze"):
+async def detect_and_set_ship_date(session: AsyncSession, content: str) -> bool:
+    """Detect natural language ship date setting. Returns True if handled."""
+    import re
+    from datetime import datetime
+    
+    # Check for ship date patterns
+    patterns = [
+        r'set.*ship.*date.*to\s+(\d{4}-\d{2}-\d{2})',
+        r'ship.*date.*is\s+(\d{4}-\d{2}-\d{2})',
+        r'our.*ship.*date.*is\s+(\d{4}-\d{2}-\d{2})',
+        r'project.*ship.*date.*is\s+(\d{4}-\d{2}-\d{2})',
+        r'we.*ship.*on\s+(\d{4}-\d{2}-\d{2})',
+        r'shipping.*on\s+(\d{4}-\d{2}-\d{2})',
+        r'launch.*date.*is\s+(\d{4}-\d{2}-\d{2})',
+        r'release.*date.*is\s+(\d{4}-\d{2}-\d{2})'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, content.lower())
+        if match:
+            date_str = match.group(1)
+            try:
+                # Validate date format
+                datetime.strptime(date_str, "%Y-%m-%d")
+                
+                # Get or create project settings
+                settings_res = await session.execute(select(ProjectSettings).limit(1))
+                settings = settings_res.scalar_one_or_none()
+                if not settings:
+                    settings = ProjectSettings(ship_date=date_str)
+                    session.add(settings)
+                else:
+                    settings.ship_date = date_str
+                await session.commit()
+                
+                # Send confirmation message
+                bot_msg = Message(user_id=None, content=f"🚢 Ship date set to: **{date_str}**", is_bot=True)
+                session.add(bot_msg)
+                await session.commit()
+                await session.refresh(bot_msg)
+                await broadcast_message(session, bot_msg)
+                
+                # Broadcast ship date update to refresh frontend
+                await manager.broadcast({"type": "ship_date_updated", "ship_date": date_str})
+                return True
+            except ValueError:
+                continue
+    
+    return False
+
+async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id: int = None, user_id: int = None):
+    # Check for milestone suggestion command, accept all, or requests for more stages
+    if content.strip().lower() == "accept all":
+        # Get current suggested milestones from recent bot message
+        msgs_res = await session.execute(select(Message).where(Message.is_bot == True).order_by(desc(Message.created_at)).limit(5))
+        recent_bot_messages = msgs_res.scalars().all()
+        
+        # Look for milestone suggestions in recent messages
+        milestone_data = None
+        for msg in recent_bot_messages:
+            if "✨ Milestones Updated" in msg.content and "Ship Date:" in msg.content:
+                # Parse milestones from the message
+                lines = msg.content.split('\n')
+                milestones = []
+                for line in lines:
+                    if line.strip() and line[0].isdigit() and '(' in line and ')' in line:
+                        # Extract milestone info: "1. Planning (2025-11-21 to 2025-11-28)"
+                        import re
+                        match = re.match(r'\d+\. (.+?) \((.+?) to (.+?)\)', line.strip())
+                        if match:
+                            title, start_date, end_date = match.groups()
+                            milestones.append({"title": title, "start_date": start_date, "end_date": end_date})
+                
+                if milestones:
+                    milestone_data = milestones
+                    break
+        
+        if milestone_data:
+            # Clear existing milestones
+            existing_res = await session.execute(select(Milestone))
+            existing_milestones = existing_res.scalars().all()
+            for m in existing_milestones:
+                await session.delete(m)
+            
+            # Add new milestones
+            for m_data in milestone_data:
+                milestone = Milestone(
+                    title=m_data["title"],
+                    start_date=m_data["start_date"],
+                    end_date=m_data["end_date"],
+                    created_by=user_id
+                )
+                session.add(milestone)
+            
+            await session.commit()
+            
+            # Broadcast milestone update
+            await manager.broadcast({"type": "milestones_updated"})
+            
+            # Send confirmation
+            reply_text = f"✅ **Accepted all {len(milestone_data)} milestones!**\n\nMilestones added to project timeline."
+        else:
+            reply_text = "❌ No recent milestone suggestions found to accept. Use `/milestones` to generate new suggestions first."
+    
+    elif (content.strip().lower().startswith("/milestones") or 
+        any(phrase in content.lower() for phrase in ["more stages", "more milestones", "add more", "need more phases"])):
+        
+        # Extract ship date or count if provided
+        parts = content.strip().split(maxsplit=1) if content.startswith("/") else []
+        extra_param = parts[1] if len(parts) > 1 else None
+        ship_date = None
+        milestone_count = 5  # default
+        
+        # Check for number in the message
+        import re
+        number_match = re.search(r'\b(\d+)\b', content)
+        if number_match:
+            milestone_count = int(number_match.group(1))
+        
+        if extra_param:
+            # Check if it's a number (milestone count) or date
+            if extra_param.isdigit():
+                milestone_count = int(extra_param)
+            elif '-' in extra_param:  # likely a date
+                ship_date = extra_param
+        
+        # Save ship date if provided
+        if ship_date:
+            settings_res = await session.execute(select(ProjectSettings).limit(1))
+            settings = settings_res.scalar_one_or_none()
+            if not settings:
+                settings = ProjectSettings(ship_date=ship_date)
+                session.add(settings)
+            else:
+                settings.ship_date = ship_date
+            await session.commit()
+        
+        # Get ship date from DB
+        settings_res = await session.execute(select(ProjectSettings).limit(1))
+        settings = settings_res.scalar_one_or_none()
+        current_ship_date = settings.ship_date if settings else None
+        
+        # Get chat history
+        msgs_res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(50))
+        messages = list(reversed(msgs_res.scalars().all()))
+        chat_history = "\n".join([f"{m.content}" for m in messages[-20:]])
+        
+        # Generate suggestions with count (don't save automatically)
+        milestones = await suggest_milestones(chat_history, current_ship_date, milestone_count)
+        
+        # Generate reasoning for chat
+        reasoning_prompt = f"""Based on the chat history and ship date {current_ship_date if current_ship_date else 'not specified'}, explain in 2-3 sentences why these milestones were chosen:
+
+{', '.join([f"{m['title']} ({m['start_date']} to {m['end_date']})" for m in milestones])}
+
+Provide a brief, practical explanation focusing on project flow and timeline considerations."""
+        
+        try:
+            reasoning = await chat_completion([{"role": "user", "content": reasoning_prompt}])
+        except:
+            reasoning = "Milestones structured to provide clear project phases with adequate time for each stage."
+        
+        # Format response
+        reply_text = f"✨ Milestones Updated\n\n"
+        if current_ship_date:
+            reply_text += f"📅 Ship Date: {current_ship_date}\n\n"
+        
+        for i, m in enumerate(milestones, 1):
+            reply_text += f"{i}. {m['title']} ({m['start_date']} to {m['end_date']})\n"
+        
+        reply_text += f"\n🧠 Reasoning: {reasoning}\n\nReply **\"accept all\"** to add all milestones to your project."
+        
+        # Send bot response to chat
+        bot_msg = Message(user_id=None, content=reply_text, is_bot=True)
+        session.add(bot_msg)
+        await session.commit()
+        await session.refresh(bot_msg)
+        await broadcast_message(session, bot_msg)
+        
+        # Broadcast milestone suggestions to frontend to trigger UI
+        await manager.broadcast({"type": "milestones_suggested", "milestones": milestones, "ship_date": current_ship_date})
+        
+        return
+    elif content.strip().lower().startswith("/project analyze"):
         # Extract timeline info if provided
         timeline_info = None
         if len(content.strip()) > len("/project analyze"):
@@ -336,6 +537,48 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id:
             reply_text = "📋 Pending Tasks:\n" + "\n".join([f"{i+1}. {t.content}" for i, t in enumerate(tasks)])
         else:
             reply_text = "No pending tasks found."
+    elif content.strip().lower().startswith("/vote "):
+        # Parse /vote command: /vote Should we use Method A or B?
+        vote_question = content.strip()[6:].strip()
+        if not vote_question:
+            reply_text = "Usage: `/vote [your question]` - Example: `/vote Should we use Method A or B?`"
+        else:
+            # Create manual vote
+            from datetime import datetime, timedelta
+            from db import ActiveConflict, ConflictSeverity
+            import uuid
+            
+            conflict_id = f"V{str(uuid.uuid4())[:8].upper()}"
+            expires_at = datetime.now() + timedelta(hours=24)
+            
+            active_conflict = ActiveConflict(
+                conflict_id=conflict_id,
+                user_statement=vote_question,
+                conflicting_evidence="Manual team vote",
+                source_file="Team Decision",
+                severity=ConflictSeverity.medium,
+                reason=vote_question,
+                expires_at=expires_at
+            )
+            
+            session.add(active_conflict)
+            await session.commit()
+            
+            reply_text = f"🗳️ **TEAM VOTE STARTED** - {conflict_id}\n\n**Question:** {vote_question}\n\n**Options:**\n**A:** Yes/Approve\n**B:** No/Reject\n**C:** Alternative/Modify\n\nVote with: `@bot decision {conflict_id} A/B/C [your reasoning]`"
+            
+            # Broadcast new vote
+            await manager.broadcast({"type": "new_conflict", "conflict_id": conflict_id})
+    elif content.strip().lower() == "/decisions":
+        from db import DecisionLog
+        decisions_res = await session.execute(select(DecisionLog).order_by(desc(DecisionLog.created_at)).limit(10))
+        decisions = decisions_res.scalars().all()
+        if decisions:
+            reply_text = "📋 Recent Decisions:\n\n" + "\n\n".join([
+                f"**{d.decision_text}**\n{d.rationale}\n*{d.created_by} • {d.created_at.strftime('%m/%d %H:%M')}*"
+                for d in decisions
+            ])
+        else:
+            reply_text = "No decisions recorded yet."
     elif content.strip().lower() == "/assign":
         tasks_res = await session.execute(select(Task).where(Task.status == TaskStatus.pending, Task.assigned_to == None).order_by(desc(Task.created_at)).limit(1))
         task = tasks_res.scalar_one_or_none()
@@ -347,6 +590,51 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id:
     elif content.strip().lower() == "/schedule":
         await manager.broadcast({"type": "open_meeting_modal"})
         return
+    elif content.strip().lower().startswith("/ship date"):
+        # Extract date if provided
+        date_part = content.strip()[len("/ship date"):].strip()
+        if date_part:
+            # Set ship date
+            try:
+                from datetime import datetime
+                # Validate date format
+                datetime.strptime(date_part, "%Y-%m-%d")
+                
+                # Get or create project settings
+                settings_res = await session.execute(select(ProjectSettings).limit(1))
+                settings = settings_res.scalar_one_or_none()
+                if not settings:
+                    settings = ProjectSettings(ship_date=date_part)
+                    session.add(settings)
+                else:
+                    settings.ship_date = date_part
+                await session.commit()
+                reply_text = f"🚢 Ship date set to: **{date_part}**"
+                
+                # Broadcast ship date update to refresh frontend
+                await manager.broadcast({"type": "ship_date_updated", "ship_date": date_part})
+            except ValueError:
+                reply_text = "❌ Invalid date format. Use YYYY-MM-DD (e.g., 2024-12-15)"
+        else:
+            # Get current ship date
+            settings_res = await session.execute(select(ProjectSettings).limit(1))
+            settings = settings_res.scalar_one_or_none()
+            if settings and settings.ship_date:
+                reply_text = f"🚢 Current ship date: **{settings.ship_date}**"
+            else:
+                reply_text = "🚢 No ship date set. Use `/ship date YYYY-MM-DD` to set it."
+
+    elif any(kw in content.lower() for kw in ["what decisions", "decisions made", "team decisions", "what did we decide"]):
+        from db import DecisionLog
+        decisions_res = await session.execute(select(DecisionLog).order_by(desc(DecisionLog.created_at)).limit(5))
+        decisions = decisions_res.scalars().all()
+        if decisions:
+            reply_text = "📋 **Recent Team Decisions:**\n\n" + "\n\n".join([
+                f"• **{d.decision_text}**\n  {d.rationale}\n  *{d.created_by} • {d.created_at.strftime('%m/%d %H:%M')}*"
+                for d in decisions
+            ])
+        else:
+            reply_text = "No team decisions have been recorded yet."
     else:
         # Duplicate prevention
         message_key = content.strip().lower()
@@ -363,6 +651,90 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id:
         
         try:
             reply_text = await conversation_chain.get_response(content)
+            
+            # Check if response is a vote request
+            if reply_text.startswith("__VOTE_REQUEST__"):
+                vote_question = reply_text.replace("__VOTE_REQUEST__", "")
+                
+                # Create manual vote (same logic as /vote command)
+                from datetime import datetime, timedelta
+                from db import ActiveConflict, ConflictSeverity
+                import uuid
+                
+                conflict_id = f"V{str(uuid.uuid4())[:8].upper()}"
+                expires_at = datetime.now() + timedelta(hours=24)
+                
+                active_conflict = ActiveConflict(
+                    conflict_id=conflict_id,
+                    user_statement=vote_question,
+                    conflicting_evidence="Manual team vote",
+                    source_file="Team Decision",
+                    severity=ConflictSeverity.medium,
+                    reason=vote_question,
+                    expires_at=expires_at
+                )
+                
+                session.add(active_conflict)
+                await session.commit()
+                
+                reply_text = f"🗳️ **TEAM VOTE STARTED** - {conflict_id}\n\n**Question:** {vote_question}\n\n**Options:**\n**A:** Yes/Approve\n**B:** No/Reject\n**C:** Alternative/Modify\n\nVote with: `@bot decision {conflict_id} A/B/C [your reasoning]`"
+                
+                # Broadcast new vote
+                await manager.broadcast({"type": "new_conflict", "conflict_id": conflict_id})
+            
+            # Check if response is a milestone request
+            elif reply_text.startswith("__MILESTONE_REQUEST__"):
+                # Get ship date from DB
+                settings_res = await session.execute(select(ProjectSettings).limit(1))
+                settings = settings_res.scalar_one_or_none()
+                current_ship_date = settings.ship_date if settings else None
+                
+                # Get chat history
+                msgs_res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(50))
+                messages = list(reversed(msgs_res.scalars().all()))
+                chat_history = "\n".join([f"{m.content}" for m in messages[-20:]])
+                
+                # Generate milestone suggestions
+                milestones = await suggest_milestones(chat_history, current_ship_date, 5)
+                
+                # Generate reasoning
+                reasoning_prompt = f"""Based on the chat history and ship date {current_ship_date if current_ship_date else 'not specified'}, explain in 2-3 sentences why these milestones were chosen:
+
+{', '.join([f"{m['title']} ({m['start_date']} to {m['end_date']})" for m in milestones])}
+
+Provide a brief, practical explanation focusing on project flow and timeline considerations."""
+                
+                try:
+                    reasoning = await chat_completion([{"role": "user", "content": reasoning_prompt}])
+                except:
+                    reasoning = "Milestones structured to provide clear project phases with adequate time for each stage."
+                
+                # Format response
+                reply_text = f"✨ **Milestone Suggestions**\n\n"
+                if current_ship_date:
+                    reply_text += f"📅 Ship Date: {current_ship_date}\n\n"
+                
+                for i, m in enumerate(milestones, 1):
+                    reply_text += f"{i}. {m['title']} ({m['start_date']} to {m['end_date']})\n"
+                
+                reply_text += f"\n🧠 Reasoning: {reasoning}\n\nReply **\"accept all\"** to add all milestones to your project."
+                
+                # Broadcast milestone suggestions to frontend
+                await manager.broadcast({"type": "milestones_suggested", "milestones": milestones, "ship_date": current_ship_date})
+            
+            # Check if response is a task request
+            elif reply_text.startswith("__TASK_REQUEST__"):
+                reply_text = "I can help you create tasks! Just describe what needs to be done and I'll extract tasks automatically. For example: 'We need to review the code by Friday and test the API endpoints.'"
+            
+            # Check if response is a meeting request
+            elif reply_text.startswith("__MEETING_REQUEST__"):
+                reply_text = "I can help you schedule a meeting! Please provide: meeting title, date/time (YYYY-MM-DD HH:MM), duration in minutes, attendees, and Zoom link if available."
+            
+            # Check if response is a status request
+            elif reply_text.startswith("__STATUS_REQUEST__"):
+                # Get project status
+                reply_text = await get_project_status()
+                
         except Exception as e:
             reply_text = f"(LLM error) {e}"
     
@@ -497,6 +869,13 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     u = res.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=401, detail="Invalid user")
+    
+    # Check if chat history needs compacting
+    if await should_compact_history():
+        compact_result = await compact_chat_history()
+        if compact_result:
+            await manager.broadcast({"type": "history_compacted", "message": compact_result})
+    
     m = Message(user_id=u.id, content=payload.content, is_bot=False)
     session.add(m)
     await session.commit()
@@ -505,40 +884,56 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     
     # DIALECTIC ENGINE: Check for decision responses FIRST
     if "@bot decision" in payload.content.lower():
-        decision_response = await handle_decision_response(payload.content, u.id, session)
+        decision_response = await process_vote_command(payload.content, u.id, session)
         if decision_response:
             bot_msg = Message(user_id=None, content=decision_response, is_bot=True)
             session.add(bot_msg)
             await session.commit()
             await session.refresh(bot_msg)
             await broadcast_message(session, bot_msg)
+            # Broadcast voting update to decision bar
+            await manager.broadcast({"type": "voting_updated"})
             return {"ok": True, "id": m.id}
     
     # DIALECTIC ENGINE: Silent monitoring for conflicts
-    conflict = await monitor_message_for_conflicts(payload.content, m.id)
-    if conflict:
-        intervention = await SocraticInterventionGenerator.generate_intervention(conflict)
-        bot_msg = Message(user_id=None, content=intervention, is_bot=True)
+    conflict_data = await monitor_message_for_conflicts(payload.content, m.id, session)
+    if conflict_data:
+        bot_msg = Message(user_id=None, content=conflict_data['intervention_message'], is_bot=True)
         session.add(bot_msg)
         await session.commit()
         await session.refresh(bot_msg)
         await broadcast_message(session, bot_msg)
+        # Broadcast new conflict to decision bar
+        await manager.broadcast({"type": "new_conflict", "conflict_id": conflict_data['conflict_id']})
         return {"ok": True, "id": m.id}
     
-    # Check if bot should respond (commands or @bot mentions)
+    # Check if bot should respond (commands, @bot mentions, or decision questions)
+    decision_keywords = ["what decisions", "decisions made", "team decisions", "what did we decide"]
     should_respond = (
         payload.content.startswith("/") or 
-        "@bot" in payload.content.lower()
+        "@bot" in payload.content.lower() or
+        any(kw in payload.content.lower() for kw in decision_keywords)
     )
     
-    # Always extract tasks and detect meetings from non-command messages FIRST
+    # Always detect meetings, milestones, and ship date from non-command messages FIRST
     meeting_handled = False
-    task_handled = False
+    milestone_handled = False
+    ship_date_handled = False
     if not payload.content.startswith("/"):
-        task_handled = await extract_and_save_tasks(session, payload.content, m.id)
         meeting_handled = await detect_and_suggest_meeting(session, payload.content, u.id)
+        milestone_response = await detect_milestone_changes(payload.content, u.id)
+        if milestone_response:
+            milestone_handled = True
+            bot_msg = Message(user_id=None, content=milestone_response, is_bot=True)
+            session.add(bot_msg)
+            await session.commit()
+            await session.refresh(bot_msg)
+            await broadcast_message(session, bot_msg)
+        # Only detect ship date if NOT mentioning @bot (to avoid interfering with bot requests)
+        if "@bot" not in payload.content.lower():
+            ship_date_handled = await detect_and_set_ship_date(session, payload.content)
     
-    if should_respond and not meeting_handled and not task_handled:
+    if should_respond and not meeting_handled and not milestone_handled and not ship_date_handled:
         # Add user message to conversation history (skip commands)
         if not payload.content.startswith("/"):
             conversation_chain.add_to_history("user", payload.content)
@@ -546,7 +941,7 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
         # fire-and-forget LLM answer with fresh session
         async def llm_task():
             async with SessionLocal() as new_session:
-                await maybe_answer_with_llm(new_session, payload.content, m.id)
+                await maybe_answer_with_llm(new_session, payload.content, m.id, u.id)
         asyncio.create_task(llm_task())
     
     return {"ok": True, "id": m.id}
@@ -665,6 +1060,24 @@ async def delete_file(file_id: int, username: str = Depends(get_current_user_tok
     await session.commit()
     
     return {"ok": True}
+
+@app.get("/api/debug/vector-db")
+async def debug_vector_db():
+    """Debug endpoint to check vector database contents"""
+    try:
+        from vector_db import collection
+        results = collection.get()
+        docs_with_rag = []
+        for i, doc in enumerate(results.get('documents', [])):
+            if any(term in doc.lower() for term in ['rag', 'retrieval', 'augmented', 'generation']):
+                docs_with_rag.append({"index": i, "preview": doc[:200]})
+        return {
+            "total_documents": len(results.get('documents', [])),
+            "rag_documents": docs_with_rag[:5],
+            "sample_search": search_documents("RAG", n_results=3)
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/files/{file_id}/download")
 async def download_file(file_id: int, token: str, session: AsyncSession = Depends(get_db)):
@@ -937,6 +1350,140 @@ async def delete_meeting(meeting_id: int, username: str = Depends(get_current_us
     await manager.broadcast({"type": "meetings_updated"})
     return {"ok": True}
 
+# --------- Milestones Routes ---------
+@app.post("/api/milestones/suggest")
+async def suggest_project_milestones(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """LLM suggests milestones based on chat history and ship date."""
+    # Get ship date
+    settings_res = await session.execute(select(ProjectSettings).limit(1))
+    settings = settings_res.scalar_one_or_none()
+    ship_date = settings.ship_date if settings else None
+    
+    # Get recent messages for context
+    msgs_res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(50))
+    messages = list(reversed(msgs_res.scalars().all()))
+    
+    chat_history = "\n".join([f"{m.content}" for m in messages[-20:]])
+    milestones = await suggest_milestones(chat_history, ship_date, 5)
+    
+    return {"milestones": milestones, "ship_date": ship_date}
+
+class MilestonePayload(BaseModel):
+    title: str
+    start_date: str
+    end_date: str
+
+@app.post("/api/milestones/bulk")
+async def bulk_accept_milestones(milestones: List[MilestonePayload], username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Accept multiple milestones at once."""
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    # Clear existing milestones
+    existing_res = await session.execute(select(Milestone))
+    for m in existing_res.scalars().all():
+        await session.delete(m)
+    
+    # Add new milestones
+    for m_data in milestones:
+        milestone = Milestone(
+            title=m_data.title,
+            start_date=m_data.start_date,
+            end_date=m_data.end_date,
+            created_by=u.id
+        )
+        session.add(milestone)
+    
+    await session.commit()
+    await manager.broadcast({"type": "milestones_updated"})
+    return {"ok": True, "count": len(milestones)}
+
+@app.post("/api/milestones")
+async def create_milestone(payload: MilestonePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Create a new milestone."""
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    milestone = Milestone(
+        title=payload.title,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        created_by=u.id
+    )
+    session.add(milestone)
+    await session.commit()
+    await session.refresh(milestone)
+    return {"ok": True, "id": milestone.id}
+
+@app.get("/api/milestones")
+async def get_milestones(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get all milestones."""
+    milestones_res = await session.execute(select(Milestone).order_by(Milestone.start_date))
+    milestones = milestones_res.scalars().all()
+    return {"milestones": [{"id": m.id, "title": m.title, "start_date": m.start_date, "end_date": m.end_date} for m in milestones]}
+
+@app.delete("/api/milestones/{milestone_id}")
+async def delete_milestone(milestone_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Delete a milestone."""
+    milestone = await session.get(Milestone, milestone_id)
+    if not milestone:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+    await session.delete(milestone)
+    await session.commit()
+    return {"ok": True}
+
+@app.patch("/api/milestones/{milestone_id}")
+async def update_milestone(milestone_id: int, payload: MilestonePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Update an existing milestone."""
+    milestone = await session.get(Milestone, milestone_id)
+    if not milestone:
+        raise HTTPException(status_code=404, detail="Milestone not found")
+    
+    milestone.title = payload.title
+    milestone.start_date = payload.start_date
+    milestone.end_date = payload.end_date
+    await session.commit()
+    return {"ok": True}
+
+# --------- Project Pulse Route ---------
+class ProjectPulsePayload(BaseModel):
+    current_date: str
+    milestones: List[Dict]
+    tasks: List[Dict]
+
+@app.post("/api/project-pulse")
+async def get_project_pulse(payload: ProjectPulsePayload, username: str = Depends(get_current_user_token)):
+    """Calculate project pulse status."""
+    result = calculate_project_pulse(payload.current_date, payload.milestones, payload.tasks)
+    return result
+
+class ShipDatePayload(BaseModel):
+    ship_date: str
+
+@app.post("/api/project/ship-date")
+async def set_ship_date(payload: ShipDatePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Set project ship date."""
+    settings_res = await session.execute(select(ProjectSettings).limit(1))
+    settings = settings_res.scalar_one_or_none()
+    if not settings:
+        settings = ProjectSettings(ship_date=payload.ship_date)
+        session.add(settings)
+    else:
+        settings.ship_date = payload.ship_date
+    await session.commit()
+    return {"ok": True, "ship_date": payload.ship_date}
+
+@app.get("/api/project/ship-date")
+async def get_ship_date(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get project ship date."""
+    settings_res = await session.execute(select(ProjectSettings).limit(1))
+    settings = settings_res.scalar_one_or_none()
+    return {"ship_date": settings.ship_date if settings else None}
+
 # --------- Dialectic Engine Routes ---------
 @app.get("/api/decisions")
 async def get_decisions(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
@@ -972,6 +1519,188 @@ async def get_decision_by_conflict(conflict_id: str, username: str = Depends(get
         "decided_by": user_obj.username if user_obj else "unknown",
         "created_at": str(decision.created_at)
     }
+
+# --------- Voting System Routes ---------
+@app.get("/api/decision-log")
+async def get_decision_log(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get project audit trail - all logged decisions."""
+    from db import DecisionLog
+    decisions_res = await session.execute(select(DecisionLog).order_by(desc(DecisionLog.created_at)))
+    decisions = decisions_res.scalars().all()
+    result = []
+    for d in decisions:
+        result.append({
+            "id": d.id,
+            "decision_text": d.decision_text,
+            "rationale": d.rationale,
+            "category": d.category.value,
+            "decision_type": d.decision_type.value,
+            "created_by": d.created_by,
+            "chat_reference_id": d.chat_reference_id,
+            "created_at": str(d.created_at)
+        })
+    return {"decisions": result}
+
+@app.get("/api/active-conflicts")
+async def get_active_conflicts(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get currently active conflicts requiring votes."""
+    from datetime import datetime
+    conflicts_res = await session.execute(
+        select(ActiveConflict).where(
+            ActiveConflict.is_resolved == False,
+            ActiveConflict.expires_at > datetime.now()
+        ).order_by(desc(ActiveConflict.created_at))
+    )
+    conflicts = conflicts_res.scalars().all()
+    
+    result = []
+    for c in conflicts:
+        # Get vote counts
+        votes_res = await session.execute(
+            select(ConflictVote).where(ConflictVote.conflict_id == c.conflict_id)
+        )
+        votes = votes_res.scalars().all()
+        
+        vote_counts = {'A': 0, 'B': 0, 'C': 0}
+        user_votes = {}
+        for vote in votes:
+            vote_counts[vote.selected_option.value] += 1
+            user_obj = await session.get(User, vote.user_id)
+            user_votes[user_obj.username if user_obj else "unknown"] = vote.selected_option.value
+        
+        remaining_time = c.expires_at - datetime.now()
+        hours_left = max(0, int(remaining_time.total_seconds() / 3600))
+        
+        result.append({
+            "conflict_id": c.conflict_id,
+            "user_statement": c.user_statement,
+            "source_file": c.source_file,
+            "severity": c.severity.value,
+            "reason": c.reason,
+            "vote_counts": vote_counts,
+            "user_votes": user_votes,
+            "hours_remaining": hours_left,
+            "created_at": str(c.created_at)
+        })
+    
+    return {"conflicts": result}
+
+class VotePayload(BaseModel):
+    conflict_id: str
+    option: str
+    reasoning: str
+
+@app.post("/api/vote")
+async def submit_vote(payload: VotePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Submit vote via decision bar."""
+    from db import ConflictVote, ActiveConflict, DecisionOption
+    from sqlalchemy import select
+    
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    # Check if conflict exists and is active
+    conflict_res = await session.execute(
+        select(ActiveConflict).where(
+            ActiveConflict.conflict_id == payload.conflict_id,
+            ActiveConflict.is_resolved == False
+        )
+    )
+    conflict = conflict_res.scalar_one_or_none()
+    
+    if not conflict:
+        raise HTTPException(status_code=400, detail=f"Conflict {payload.conflict_id} not found or already resolved.")
+    
+    # Check if user already voted
+    existing_vote_res = await session.execute(
+        select(ConflictVote).where(
+            ConflictVote.conflict_id == payload.conflict_id,
+            ConflictVote.user_id == u.id
+        )
+    )
+    existing_vote = existing_vote_res.scalar_one_or_none()
+    
+    if existing_vote:
+        # Update existing vote
+        existing_vote.selected_option = DecisionOption(payload.option)
+        existing_vote.reasoning = payload.reasoning
+    else:
+        # Create new vote
+        vote = ConflictVote(
+            conflict_id=payload.conflict_id,
+            user_id=u.id,
+            selected_option=DecisionOption(payload.option),
+            reasoning=payload.reasoning
+        )
+        session.add(vote)
+    
+    await session.commit()
+    
+    # Broadcast voting update
+    await manager.broadcast({"type": "voting_updated"})
+    return {"ok": True}
+
+@app.post("/api/conflicts/{conflict_id}/end")
+async def end_conflict_voting(conflict_id: str, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """End voting for a conflict and resolve it."""
+    from db import ActiveConflict, ConflictVote, DecisionLog, DecisionCategory, DecisionType
+    from sqlalchemy import select
+    
+    # Get conflict
+    conflict_res = await session.execute(
+        select(ActiveConflict).where(ActiveConflict.conflict_id == conflict_id)
+    )
+    conflict = conflict_res.scalar_one_or_none()
+    
+    if not conflict:
+        raise HTTPException(status_code=404, detail="Conflict not found")
+    
+    # Get votes
+    votes_res = await session.execute(
+        select(ConflictVote).where(ConflictVote.conflict_id == conflict_id)
+    )
+    votes = votes_res.scalars().all()
+    
+    # Count votes
+    vote_counts = {'A': 0, 'B': 0, 'C': 0}
+    for vote in votes:
+        vote_counts[vote.selected_option.value] += 1
+    
+    # Determine winner
+    winner = max(vote_counts, key=vote_counts.get)
+    
+    # Mark conflict as resolved
+    conflict.is_resolved = True
+    
+    # Log decision
+    decision_log = DecisionLog(
+        decision_text=f"Team voted on conflict {conflict_id}",
+        rationale=f"Option {winner} won with {vote_counts[winner]} votes (A:{vote_counts['A']} B:{vote_counts['B']} C:{vote_counts['C']})",
+        category=DecisionCategory.methodology,
+        decision_type=DecisionType.consensus,
+        created_by="Team_Vote"
+    )
+    session.add(decision_log)
+    
+    await session.commit()
+    
+    # Broadcast update
+    await manager.broadcast({"type": "voting_updated"})
+    await manager.broadcast({"type": "decisions_updated"})
+    
+    return {"ok": True, "winner": winner, "votes": vote_counts}
+
+@app.delete("/api/decision-log/clear")
+async def clear_decision_log(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Clear all decision log entries."""
+    from db import DecisionLog
+    from sqlalchemy import delete
+    await session.execute(delete(DecisionLog))
+    await session.commit()
+    await manager.broadcast({"type": "decisions_updated"})
+    return {"ok": True}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
