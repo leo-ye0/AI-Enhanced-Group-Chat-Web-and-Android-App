@@ -19,6 +19,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(100), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
     messages = relationship("Message", back_populates="user")
     files = relationship("UploadedFile", back_populates="user")
@@ -56,6 +57,8 @@ class Task(Base):
     assigned_to: Mapped[str] = mapped_column(Text(), nullable=True)
     due_date: Mapped[str] = mapped_column(String(100), nullable=True)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.pending)
+    pending_assignment: Mapped[bool] = mapped_column(Boolean(), default=False)
+    assignment_expires_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class Meeting(Base):

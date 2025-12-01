@@ -2,6 +2,7 @@ import os
 import asyncio
 import time
 import uuid
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, UploadFile, File
 from fastapi.responses import FileResponse
@@ -29,6 +30,10 @@ from dialectic_engine import monitor_message_for_conflicts, process_vote_command
 from project_pulse import calculate_project_pulse
 from milestone_suggester import suggest_milestones
 from milestone_manager import detect_milestone_changes
+from task_assigner import assign_task_to_user
+from role_normalizer import normalize_role
+from task_manager import detect_task_action
+from task_assignment_detector import detect_task_assignment
 
 load_dotenv()
 
@@ -568,6 +573,60 @@ Provide a brief, practical explanation focusing on project flow and timeline con
             
             # Broadcast new vote
             await manager.broadcast({"type": "new_conflict", "conflict_id": conflict_id})
+    elif content.strip().lower().startswith("/role "):
+        # Set user's role: /role Frontend Developer
+        user_input = content.strip()[6:].strip()
+        if not user_input:
+            reply_text = "Usage: `/role [your title]` - Example: `/role SWE` or `/role UI Designer`"
+        else:
+            user = await session.get(User, user_id)
+            if user:
+                # Normalize role using LLM
+                normalized_role = await normalize_role(user_input)
+                user.role = normalized_role
+                await session.commit()
+                if normalized_role != user_input:
+                    reply_text = f"✅ Your role has been set to: **{normalized_role}**\n\n💡 Normalized from: \"{user_input}\""
+                else:
+                    reply_text = f"✅ Your role has been set to: **{normalized_role}**"
+            else:
+                reply_text = "❌ User not found"
+    elif content.strip().lower() == "/role":
+        # Show current role
+        user = await session.get(User, user_id)
+        if user and user.role:
+            reply_text = f"Your current role: **{user.role}**\n\nTo change: `/role [new role]`"
+        else:
+            reply_text = "You haven't set a role yet.\n\nSet your role: `/role [your role]`\nExample: `/role Backend Developer`"
+    elif content.strip().lower().startswith("/assign "):
+        # Parse /assign command: /assign task_id or /assign "task description" [to user]
+        assign_param = content.strip()[8:].strip()
+        if not assign_param:
+            reply_text = "Usage: `/assign [task]` or `/assign [task] to [user]`\nExample: `/assign \"Build login\" to alice`"
+        elif assign_param.isdigit():
+            # Assign existing task by ID
+            task = await session.get(Task, int(assign_param))
+            if task:
+                result = await assign_task_to_user(session, task.content, task.id, content)
+                due_date_text = f"\n📅 Due: {result['due_date']}" if result.get('due_date') else ""
+                reply_text = f"✅ Task assigned to **{result['assigned_to']}**{due_date_text}\n\n📋 Task: {task.content}\n\n💡 Reason: {result['reason']}"
+                await manager.broadcast({"type": "tasks_updated"})
+            else:
+                reply_text = f"❌ Task #{assign_param} not found"
+        else:
+            # Assign new task with natural language support
+            result = await assign_task_to_user(session, assign_param, None, content)
+            task = Task(
+                content=assign_param,
+                assigned_to=result['assigned_to'],
+                due_date=result.get('due_date'),
+                status=TaskStatus.pending
+            )
+            session.add(task)
+            await session.commit()
+            due_date_text = f"\n📅 Due: {result['due_date']}" if result.get('due_date') else ""
+            reply_text = f"✅ Task created and assigned to **{result['assigned_to']}**{due_date_text}\n\n📋 Task: {assign_param}\n\n💡 Reason: {result['reason']}"
+            await manager.broadcast({"type": "tasks_updated"})
     elif content.strip().lower() == "/decisions":
         from db import DecisionLog
         decisions_res = await session.execute(select(DecisionLog).order_by(desc(DecisionLog.created_at)).limit(10))
@@ -749,6 +808,42 @@ Provide a brief, practical explanation focusing on project flow and timeline con
 async def on_startup():
     await init_db()
     await run_migrations()
+    asyncio.create_task(check_expired_assignments())
+
+async def check_expired_assignments():
+    """Background task to check for expired task assignments."""
+    while True:
+        try:
+            await asyncio.sleep(3600)  # Check every hour
+            async with SessionLocal() as session:
+                now = datetime.now()
+                expired_res = await session.execute(
+                    select(Task).where(
+                        Task.pending_assignment == True,
+                        Task.assignment_expires_at < now
+                    )
+                )
+                expired_tasks = expired_res.scalars().all()
+                
+                for task in expired_tasks:
+                    assignee = task.assigned_to
+                    task.assigned_to = None
+                    task.pending_assignment = False
+                    task.assignment_expires_at = None
+                    await session.commit()
+                    
+                    bot_msg = Message(
+                        user_id=None,
+                        content=f"⏰ Task assignment expired. **@{assignee}** didn't respond.\n\n📋 Task: **{task.content}**\n\nNow open for anyone to claim: `claim {task.id}`",
+                        is_bot=True
+                    )
+                    session.add(bot_msg)
+                    await session.commit()
+                    await session.refresh(bot_msg)
+                    await broadcast_message(session, bot_msg)
+                    await manager.broadcast({"type": "tasks_updated"})
+        except Exception as e:
+            print(f"Error checking expired assignments: {e}")
 
 @app.post("/api/signup")
 async def signup(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
@@ -844,6 +939,27 @@ async def login(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
     asyncio.create_task(send_summary())
     return {"ok": True, "token": token}
 
+class RolePayload(BaseModel):
+    role: str
+
+@app.patch("/api/user/role")
+async def update_user_role(payload: RolePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Update user's role for task assignment."""
+    res = await session.execute(select(User).where(User.username == username))
+    user = res.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.role = payload.role
+    await session.commit()
+    return {"ok": True, "role": user.role}
+
+@app.get("/api/users")
+async def get_users(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get all users with their roles."""
+    res = await session.execute(select(User))
+    users = res.scalars().all()
+    return {"users": [{"username": u.username, "role": u.role} for u in users]}
+
 @app.get("/api/messages")
 async def get_messages(limit: int = 50, session: AsyncSession = Depends(get_db)):
     res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(limit))
@@ -895,8 +1011,9 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             await manager.broadcast({"type": "voting_updated"})
             return {"ok": True, "id": m.id}
     
-    # DIALECTIC ENGINE: Silent monitoring for conflicts
-    conflict_data = await monitor_message_for_conflicts(payload.content, m.id, session)
+    # DIALECTIC ENGINE: Silent monitoring for conflicts (skip system commands)
+    is_system_command = payload.content.strip().lower().startswith(("accept ", "decline ", "claim ", "/role", "/assign", "/tasks", "/decisions", "/milestones", "/project", "/vote"))
+    conflict_data = None if is_system_command else await monitor_message_for_conflicts(payload.content, m.id, session)
     if conflict_data:
         bot_msg = Message(user_id=None, content=conflict_data['intervention_message'], is_bot=True)
         session.add(bot_msg)
@@ -906,6 +1023,124 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
         # Broadcast new conflict to decision bar
         await manager.broadcast({"type": "new_conflict", "conflict_id": conflict_data['conflict_id']})
         return {"ok": True, "id": m.id}
+    
+    # Handle task acceptance/decline
+    content_lower = payload.content.strip().lower()
+    if content_lower.startswith("accept ") or content_lower.startswith("decline "):
+        action = "accept" if content_lower.startswith("accept") else "decline"
+        task_id_str = content_lower.split()[1] if len(content_lower.split()) > 1 else None
+        
+        if task_id_str and task_id_str.isdigit():
+            task = await session.get(Task, int(task_id_str))
+            if task and task.pending_assignment:
+                # Check if current user is the assigned user
+                if task.assigned_to != u.username:
+                    bot_msg = Message(user_id=None, content=f"❌ Only **@{task.assigned_to}** can accept or decline this task.", is_bot=True)
+                    session.add(bot_msg)
+                    await session.commit()
+                    await session.refresh(bot_msg)
+                    await broadcast_message(session, bot_msg)
+                    return {"ok": True, "id": m.id}
+                
+                if action == "accept":
+                    task.pending_assignment = False
+                    task.assignment_expires_at = None
+                    await session.commit()
+                    bot_msg = Message(user_id=None, content=f"✅ **@{task.assigned_to}** confirmed task: **{task.content}**", is_bot=True)
+                else:
+                    # Decline - make it open for others
+                    task.assigned_to = None
+                    task.pending_assignment = False
+                    task.assignment_expires_at = None
+                    await session.commit()
+                    bot_msg = Message(user_id=None, content=f"🔄 **@{u.username}** declined. Task now open: **{task.content}**\n\nAnyone can claim with: `claim {task.id}`", is_bot=True)
+                
+                session.add(bot_msg)
+                await session.commit()
+                await session.refresh(bot_msg)
+                await broadcast_message(session, bot_msg)
+                await manager.broadcast({"type": "tasks_updated"})
+                return {"ok": True, "id": m.id}
+    
+    # Handle task claiming
+    if content_lower.startswith("claim "):
+        task_id_str = content_lower.split()[1] if len(content_lower.split()) > 1 else None
+        if task_id_str and task_id_str.isdigit():
+            task = await session.get(Task, int(task_id_str))
+            if task and not task.assigned_to:
+                task.assigned_to = u.username
+                await session.commit()
+                bot_msg = Message(user_id=None, content=f"✅ **@{u.username}** claimed task: **{task.content}**", is_bot=True)
+                session.add(bot_msg)
+                await session.commit()
+                await session.refresh(bot_msg)
+                await broadcast_message(session, bot_msg)
+                await manager.broadcast({"type": "tasks_updated"})
+                return {"ok": True, "id": m.id}
+    
+    # Detect natural language task assignment (without /assign command) - check BEFORE bot response
+    # Remove @bot prefix for detection
+    content_for_detection = payload.content.replace("@bot", "").strip()
+    # Skip if it's a system command (accept/decline/claim)
+    is_system_cmd = content_for_detection.lower().startswith(("accept ", "decline ", "claim "))
+    if not payload.content.startswith("/") and not is_system_cmd:
+        assignment = await detect_task_assignment(content_for_detection)
+        print(f"Task assignment detection result: {assignment}")
+        if assignment:
+            task_desc = assignment['task']
+            assignee_hint = assignment.get('assignee')
+            user_msg = payload.content if assignee_hint else None
+            
+            result = await assign_task_to_user(session, task_desc, None, user_msg)
+            
+            # Create task with pending assignment (24h to accept)
+            expires_at = datetime.now() + timedelta(hours=24)
+            task = Task(
+                content=task_desc,
+                assigned_to=result['assigned_to'],
+                due_date=result.get('due_date'),
+                status=TaskStatus.pending,
+                pending_assignment=True,
+                assignment_expires_at=expires_at
+            )
+            session.add(task)
+            await session.commit()
+            await session.refresh(task)
+            
+            due_date_text = f"\n📅 Due: {result['due_date']}" if result.get('due_date') else ""
+            bot_msg = Message(
+                user_id=None,
+                content=f"🔔 Task suggested for **@{result['assigned_to']}**{due_date_text}\n\n📋 Task: {task_desc}\n\n💡 {result['reason']}\n\n**@{result['assigned_to']}**, reply:\n- `accept {task.id}` to accept\n- `decline {task.id}` to decline\n\n⏱️ Expires in 24 hours",
+                is_bot=True
+            )
+            session.add(bot_msg)
+            await session.commit()
+            await session.refresh(bot_msg)
+            await broadcast_message(session, bot_msg)
+            await manager.broadcast({"type": "tasks_updated"})
+            return {"ok": True, "id": m.id}
+    
+    # Detect task completion/deletion requests (skip if it's accept/decline/claim)
+    is_task_command = content_lower.startswith(("accept ", "decline ", "claim "))
+    task_action = None if is_task_command else await detect_task_action(session, payload.content)
+    if task_action:
+        task = await session.get(Task, task_action['task_id'])
+        if task:
+            if task_action['action'] == 'complete':
+                task.status = TaskStatus.completed
+                await session.commit()
+                bot_msg = Message(user_id=None, content=f"✅ Task completed: **{task.content}**", is_bot=True)
+            elif task_action['action'] == 'delete':
+                task_content = task.content
+                await session.delete(task)
+                await session.commit()
+                bot_msg = Message(user_id=None, content=f"🗑️ Task deleted: **{task_content}**", is_bot=True)
+            session.add(bot_msg)
+            await session.commit()
+            await session.refresh(bot_msg)
+            await broadcast_message(session, bot_msg)
+            await manager.broadcast({"type": "tasks_updated"})
+            return {"ok": True, "id": m.id}
     
     # Check if bot should respond (commands, @bot mentions, or decision questions)
     decision_keywords = ["what decisions", "decisions made", "team decisions", "what did we decide"]
@@ -1126,7 +1361,15 @@ async def get_tasks(username: str = Depends(get_current_user_token), session: As
     tasks = tasks_res.scalars().all()
     result = []
     for t in tasks:
-        result.append({"id": t.id, "content": t.content, "status": t.status.value, "assigned_to": t.assigned_to, "due_date": t.due_date, "created_at": str(t.created_at)})
+        result.append({
+            "id": t.id, 
+            "content": t.content, 
+            "status": t.status.value, 
+            "assigned_to": t.assigned_to, 
+            "due_date": t.due_date, 
+            "pending_assignment": t.pending_assignment if hasattr(t, 'pending_assignment') else False,
+            "created_at": str(t.created_at)
+        })
     return {"tasks": result}
 
 class DueDatePayload(BaseModel):
@@ -1165,6 +1408,26 @@ async def create_task(payload: MessagePayload, username: str = Depends(get_curre
     await manager.broadcast({"type": "tasks_updated"})
     return {"ok": True}
 
+class TaskUpdatePayload(BaseModel):
+    content: Optional[str] = None
+    due_date: Optional[str] = None
+    assigned_to: Optional[str] = None
+
+@app.patch("/api/tasks/{task_id}")
+async def update_task(task_id: int, payload: TaskUpdatePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if payload.content:
+        task.content = payload.content
+    if payload.due_date is not None:
+        task.due_date = payload.due_date
+    if payload.assigned_to is not None:
+        task.assigned_to = payload.assigned_to
+    await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
+    return {"ok": True}
+
 class AssignPayload(BaseModel):
     usernames: str
 
@@ -1176,6 +1439,39 @@ async def assign_task(task_id: int, payload: AssignPayload, username: str = Depe
     task.assigned_to = payload.usernames
     await session.commit()
     await manager.broadcast({"type": "tasks_updated"})
+    return {"ok": True}
+
+@app.post("/api/tasks/{task_id}/complete")
+async def complete_task(task_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.status = TaskStatus.completed
+    await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
+    # Send notification message
+    bot_msg = Message(user_id=None, content=f"✅ Task completed: **{task.content}**", is_bot=True)
+    session.add(bot_msg)
+    await session.commit()
+    await session.refresh(bot_msg)
+    await broadcast_message(session, bot_msg)
+    return {"ok": True}
+
+@app.delete("/api/tasks/{task_id}")
+async def delete_task(task_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    task = await session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task_content = task.content
+    await session.delete(task)
+    await session.commit()
+    await manager.broadcast({"type": "tasks_updated"})
+    # Send notification message
+    bot_msg = Message(user_id=None, content=f"🗑️ Task deleted: **{task_content}**", is_bot=True)
+    session.add(bot_msg)
+    await session.commit()
+    await session.refresh(bot_msg)
+    await broadcast_message(session, bot_msg)
     return {"ok": True}
 
 @app.patch("/api/tasks/{task_id}/content")

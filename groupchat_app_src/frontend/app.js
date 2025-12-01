@@ -89,12 +89,14 @@ function showChat() {
   chatPanel.classList.remove("hidden");
   $("leftNav").classList.remove("hidden");
   $("rightSidebar").classList.remove("hidden");
+  loadCurrentUserProfile();
   loadDecisions();
   loadGroupBrain();
   loadSidebarTasks();
   loadNextMeeting();
   loadProjectPulse();
   loadActiveConflicts();
+  loadTeamRoles();
   
   setTimeout(() => {
     if ($("expandMeetings")) {
@@ -113,23 +115,87 @@ function showChat() {
     if ($("tasksTab")) {
       $("tasksTab").onclick = () => {
         $("tasksTab").classList.add('active');
+        $("archivedTab").classList.remove('active');
         $("decisionsTab").classList.remove('active');
         $("tasksContent").classList.remove('hidden');
+        $("archivedContent").classList.add('hidden');
         $("decisionsContent").classList.add('hidden');
+      };
+    }
+    if ($("archivedTab")) {
+      $("archivedTab").onclick = () => {
+        $("archivedTab").classList.add('active');
+        $("tasksTab").classList.remove('active');
+        $("decisionsTab").classList.remove('active');
+        $("archivedContent").classList.remove('hidden');
+        $("tasksContent").classList.add('hidden');
+        $("decisionsContent").classList.add('hidden');
+        loadArchivedTasks();
       };
     }
     if ($("decisionsTab")) {
       $("decisionsTab").onclick = () => {
         $("decisionsTab").classList.add('active');
         $("tasksTab").classList.remove('active');
+        $("archivedTab").classList.remove('active');
         $("decisionsContent").classList.remove('hidden');
         $("tasksContent").classList.add('hidden');
+        $("archivedContent").classList.add('hidden');
       };
     }
     if ($("addTaskBtnSidebar")) {
-      $("addTaskBtnSidebar").onclick = () => {
-        taskInput.classList.remove('hidden');
-        newTaskContent.focus();
+      $("addTaskBtnSidebar").onclick = async () => {
+        const sidebarTaskInput = $("sidebarTaskInput");
+        if (sidebarTaskInput) {
+          // Populate assignee dropdown
+          try {
+            const usersData = await callAPI('/users');
+            const assigneeSelect = $("sidebarNewTaskAssignee");
+            if (assigneeSelect) {
+              assigneeSelect.innerHTML = '<option value="">Unassigned</option>' +
+                usersData.users.map(u => `<option value="${u.username}">${u.username}${u.role ? ' (' + u.role + ')' : ''}</option>`).join('');
+            }
+          } catch (e) {
+            console.error('Failed to load users:', e);
+          }
+          
+          sidebarTaskInput.classList.remove('hidden');
+          const input = $("sidebarNewTaskContent");
+          if (input) setTimeout(() => input.focus(), 50);
+        }
+      };
+    }
+    
+    // Sidebar save button - will be overridden by editTaskInline for edit mode
+    if ($("sidebarSaveTaskBtn")) {
+      $("sidebarSaveTaskBtn").onclick = async () => {
+        const input = $("sidebarNewTaskContent");
+        const dueDateInput = $("sidebarNewTaskDueDate");
+        const assigneeInput = $("sidebarNewTaskAssignee");
+        const content = input?.value.trim();
+        if (!content) return;
+        try {
+          const payload = {content};
+          if (dueDateInput?.value) payload.due_date = dueDateInput.value;
+          if (assigneeInput?.value) payload.assigned_to = assigneeInput.value;
+          await callAPI('/tasks', 'POST', payload);
+          input.value = '';
+          dueDateInput.value = '';
+          if (assigneeInput) assigneeInput.value = '';
+          $("sidebarTaskInput").classList.add('hidden');
+          await loadSidebarTasks();
+        } catch (e) {
+          alert('Failed to add task: ' + e.message);
+        }
+      };
+    }
+    
+    if ($("sidebarCancelTaskBtn")) {
+      $("sidebarCancelTaskBtn").onclick = () => {
+        $("sidebarNewTaskContent").value = '';
+        $("sidebarNewTaskDueDate").value = '';
+        $("sidebarTaskInput").classList.add('hidden');
+        delete window.editingTaskId;
       };
     }
   }, 100);
@@ -145,12 +211,28 @@ async function callAPI(path, method = "GET", body) {
   return res.json();
 }
 
-function addMessage(m) {
+async function addMessage(m) {
   const el = document.createElement("div");
   el.className = "message" + (m.is_bot ? " bot" : "");
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = `${m.username || "unknown"} • ${new Date(m.created_at).toLocaleString()}`;
+  
+  // Get user role for display
+  let displayName = m.username || "unknown";
+  if (!m.is_bot && m.username && m.username !== "unknown") {
+    try {
+      const usersData = await callAPI('/users');
+      const user = usersData.users.find(u => u.username === m.username);
+      if (user && user.role) {
+        const firstRole = user.role.split(',')[0].trim();
+        displayName = `${m.username} (${firstRole})`;
+      }
+    } catch (e) {
+      // Fallback to username only if API call fails
+    }
+  }
+  
+  meta.textContent = `${displayName} • ${new Date(m.created_at).toLocaleString()}`;
   const body = document.createElement("div");
   body.style.whiteSpace = "pre-wrap";
   if (m.is_bot) {
@@ -170,7 +252,7 @@ function addMessage(m) {
 async function loadMessages() {
   const data = await callAPI("/messages");
   messagesDiv.innerHTML = "";
-  for (const m of data.messages) addMessage(m);
+  for (const m of data.messages) await addMessage(m);
 }
 
 async function loadFiles() {
@@ -232,7 +314,13 @@ function connectWS() {
   ws.onmessage = (ev) => {
     try {
       const data = JSON.parse(ev.data);
-      if (data.type === "message") addMessage(data.message);
+      if (data.type === "message") {
+        addMessage(data.message);
+        if (data.message.content && data.message.content.includes('Your role has been set to:')) {
+          loadTeamRoles();
+          loadCurrentUserProfile();
+        }
+      }
       if (data.type === "clear") messagesDiv.innerHTML = "";
       if (data.type === "tasks_updated") {
         console.log('Received tasks_updated event, reloading tasks...');
@@ -384,10 +472,141 @@ function jumpToMessage(messageId) {
   });
 }
 
+async function editTaskInline(task, taskElement) {
+  // Remove any existing edit forms
+  document.querySelectorAll('.inline-task-edit').forEach(el => el.remove());
+  
+  // Get users for assignee dropdown
+  const usersData = await callAPI('/users');
+  const users = usersData.users;
+  
+  // Create inline edit form
+  const editForm = document.createElement('div');
+  editForm.className = 'inline-task-edit';
+  editForm.style.cssText = 'margin:4px 0;padding:8px;background:#f0f9ff;border:1px solid #3b82f6;border-radius:4px';
+  editForm.innerHTML = `
+    <input id="editTaskContent" value="${task.content}" style="width:100%;padding:4px;border:1px solid #ddd;border-radius:3px;font-size:11px;margin-bottom:4px">
+    <input type="date" id="editTaskDueDate" value="${task.due_date || ''}" style="width:100%;padding:4px;border:1px solid #ddd;border-radius:3px;font-size:11px;margin-bottom:4px">
+    <select id="editTaskAssignee" style="width:100%;padding:4px;border:1px solid #ddd;border-radius:3px;font-size:11px;margin-bottom:4px">
+      <option value="">Unassigned</option>
+      ${users.map(u => `<option value="${u.username}" ${task.assigned_to === u.username ? 'selected' : ''}>${u.username}${u.role ? ' (' + u.role + ')' : ''}</option>`).join('')}
+    </select>
+    <div style="display:flex;gap:4px">
+      <button class="toggle-btn" style="flex:1;font-size:10px" onclick="saveTaskEdit(${task.id})">Save</button>
+      <button class="toggle-btn" style="flex:1;font-size:10px" onclick="cancelTaskEdit()">Cancel</button>
+    </div>
+  `;
+  
+  taskElement.after(editForm);
+  editForm.querySelector('#editTaskContent').focus();
+}
+
+async function saveTaskEdit(taskId) {
+  const content = document.getElementById('editTaskContent').value.trim();
+  const dueDate = document.getElementById('editTaskDueDate').value;
+  const assignee = document.getElementById('editTaskAssignee').value;
+  
+  if (!content) return;
+  
+  try {
+    const payload = {content};
+    if (dueDate) payload.due_date = dueDate;
+    if (assignee) payload.assigned_to = assignee;
+    await callAPI(`/tasks/${taskId}`, 'PATCH', payload);
+    cancelTaskEdit();
+    await loadSidebarTasks();
+  } catch (e) {
+    alert('Failed to update task: ' + e.message);
+  }
+}
+
+function cancelTaskEdit() {
+  document.querySelectorAll('.inline-task-edit').forEach(el => el.remove());
+}
+
+window.acceptTask = async function(taskId) {
+  try {
+    await callAPI('/messages', 'POST', {content: `accept ${taskId}`});
+    await loadSidebarTasks();
+  } catch (e) {
+    alert('Failed to accept task: ' + e.message);
+  }
+};
+
+window.declineTask = async function(taskId) {
+  try {
+    await callAPI('/messages', 'POST', {content: `decline ${taskId}`});
+    await loadSidebarTasks();
+  } catch (e) {
+    alert('Failed to decline task: ' + e.message);
+  }
+};
+
+window.completeTask = async function(taskId) {
+  try {
+    await callAPI(`/tasks/${taskId}/complete`, 'POST');
+    await loadSidebarTasks();
+  } catch (e) {
+    alert('Failed to complete task: ' + e.message);
+  }
+};
+
+window.deleteTask = async function(taskId) {
+  if (!confirm('Delete this task?')) return;
+  try {
+    await callAPI(`/tasks/${taskId}`, 'DELETE');
+    await loadSidebarTasks();
+  } catch (e) {
+    alert('Failed to delete task: ' + e.message);
+  }
+};
+
+async function loadArchivedTasks() {
+  try {
+    const [tasksData, usersData] = await Promise.all([callAPI("/tasks"), callAPI("/users")]);
+    const tasks = tasksData.tasks.filter(t => t.status === 'completed').slice(0, 10);
+    const users = usersData.users;
+    const list = $("sidebarArchived");
+    if (!list) return;
+    list.innerHTML = "";
+    if (tasks.length === 0) {
+      list.innerHTML = '<div class="no-decisions">No completed tasks</div>';
+    } else {
+      tasks.forEach(t => {
+        const el = document.createElement("div");
+        el.className = "sidebar-task";
+        el.style.background = "#d1fae5";
+        const assignees = t.assigned_to ? t.assigned_to.split(',').map(a => a.trim()) : [];
+        const assigneeInfo = assignees.map(username => {
+          const user = users.find(u => u.username === username);
+          const role = user?.role ? ` (${user.role})` : '';
+          return `@${username}${role}`;
+        }).join(', ');
+        const due = t.due_date ? `<div style="font-size:10px;opacity:0.7;margin-top:2px">📅 ${t.due_date}</div>` : '';
+        el.innerHTML = `
+          <div style="display:flex;gap:4px;align-items:start">
+            <span style="flex-shrink:0">✓</span>
+            <div style="flex:1">
+              <div style="font-size:11px;text-decoration:line-through;opacity:0.7">${t.content.substring(0, 40)}${t.content.length > 40 ? '...' : ''}</div>
+              ${assigneeInfo ? `<div style="font-size:10px;opacity:0.6;margin-top:2px">${assigneeInfo}</div>` : ''}
+              ${due}
+            </div>
+            <button onclick="event.stopPropagation();deleteTask(${t.id})" style="padding:2px 4px;font-size:10px;background:#ef4444;color:white;border:none;border-radius:3px;cursor:pointer" title="Delete">×</button>
+          </div>
+        `;
+        list.appendChild(el);
+      });
+    }
+  } catch (e) {
+    console.error("Failed to load archived tasks:", e);
+  }
+}
+
 async function loadSidebarTasks() {
   try {
-    const data = await callAPI("/tasks");
-    const tasks = data.tasks.filter(t => t.status === 'pending').slice(0, 5);
+    const [tasksData, usersData] = await Promise.all([callAPI("/tasks"), callAPI("/users")]);
+    const tasks = tasksData.tasks.filter(t => t.status === 'pending').slice(0, 5);
+    const users = usersData.users;
     const list = $("sidebarTasks");
     if (!list) return;
     list.innerHTML = "";
@@ -397,9 +616,49 @@ async function loadSidebarTasks() {
       tasks.forEach(t => {
         const el = document.createElement("div");
         el.className = "sidebar-task";
-        const assignees = t.assigned_to ? t.assigned_to.split(',').map(a => `@${a.trim()}`).join(', ') : '';
-        const due = t.due_date ? `(Due ${t.due_date})` : '';
-        el.innerHTML = `⬜ ${assignees ? assignees + ': ' : ''}${t.content.substring(0, 30)}... ${due}`;
+        el.style.cursor = "pointer";
+        el.onclick = () => {
+          // If clicking the same task, cancel edit
+          if (el.nextElementSibling?.classList.contains('inline-task-edit')) {
+            cancelTaskEdit();
+          } else {
+            editTaskInline(t, el);
+          }
+        };
+        const assignees = t.assigned_to ? t.assigned_to.split(',').map(a => a.trim()) : [];
+        const assigneeInfo = assignees.map(username => {
+          const user = users.find(u => u.username === username);
+          const role = user?.role ? ` (${user.role})` : '';
+          return `@${username}${role}`;
+        }).join(', ');
+        const due = t.due_date ? `<div style="font-size:10px;opacity:0.7;margin-top:2px">📅 ${t.due_date}</div>` : '';
+        const isPending = t.pending_assignment === true;
+        const isConfirmed = t.assigned_to && !isPending && t.status === 'pending';
+        const isCompleted = t.status === 'completed';
+        const isUnassigned = !t.assigned_to && !isPending;
+        console.log(`Task ${t.id}: pending=${isPending}, confirmed=${isConfirmed}, completed=${isCompleted}, status=${t.status}, pending_assignment=${t.pending_assignment}`);
+        const icon = isPending ? '⏳' : (isCompleted ? '✓' : (isConfirmed ? '🔵' : '⬜'));
+        const bgColor = isPending ? '#fef3c7' : (isCompleted ? '#d1fae5' : (isConfirmed ? '#dbeafe' : 'transparent'));
+        el.style.background = bgColor;
+        el.innerHTML = `
+          <div style="display:flex;gap:4px;align-items:start">
+            <span style="flex-shrink:0">${icon}</span>
+            <div style="flex:1">
+              <div style="font-size:11px">${t.content.substring(0, 40)}${t.content.length > 40 ? '...' : ''}</div>
+              ${assigneeInfo ? `<div style="font-size:10px;opacity:0.8;margin-top:2px">${assigneeInfo}${isPending ? ' (pending)' : ''}</div>` : ''}
+              ${due}
+            </div>
+            <div style="display:flex;gap:2px;flex-shrink:0">
+              ${isPending ? `
+                <button onclick="event.stopPropagation();acceptTask(${t.id})" style="padding:2px 4px;font-size:10px;background:#3b82f6;color:white;border:none;border-radius:3px;cursor:pointer" title="Accept">✓</button>
+                <button onclick="event.stopPropagation();declineTask(${t.id})" style="padding:2px 4px;font-size:10px;background:#ef4444;color:white;border:none;border-radius:3px;cursor:pointer" title="Decline">×</button>
+              ` : `
+                <button onclick="event.stopPropagation();completeTask(${t.id})" style="padding:2px 4px;font-size:10px;background:#10b981;color:white;border:none;border-radius:3px;cursor:pointer" title="Complete">✓</button>
+                <button onclick="event.stopPropagation();deleteTask(${t.id})" style="padding:2px 4px;font-size:10px;background:#ef4444;color:white;border:none;border-radius:3px;cursor:pointer" title="Delete">×</button>
+              `}
+            </div>
+          </div>
+        `;
         list.appendChild(el);
       });
     }
@@ -1003,7 +1262,7 @@ chatInput.oninput = (e) => {
     mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertMention(\'bot\')">@bot</div>';
     mentionDropdown.classList.remove('hidden');
   } else if (lastSlashPos !== -1 && lastSlashPos === text.length - 1) {
-    mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertCommand(\'project analyze\')">project analyze</div><div class="mention-item" onclick="insertCommand(\'project status\')">project status</div><div class="mention-item" onclick="insertCommand(\'tasks\')">tasks</div><div class="mention-item" onclick="insertCommand(\'assign\')">assign</div><div class="mention-item" onclick="insertCommand(\'schedule\')">schedule</div><div class="mention-item" onclick="insertCommand(\'milestones\')">milestones</div><div class="mention-item" onclick="insertCommand(\'decisions\')">decisions</div><div class="mention-item" onclick="insertCommand(\'vote\')">vote [question]</div>';
+    mentionDropdown.innerHTML = '<div class="mention-item" onclick="insertCommand(\'role\')">role [your role]</div><div class="mention-item" onclick="insertCommand(\'assign\')">assign [task]</div><div class="mention-item" onclick="insertCommand(\'project analyze\')">project analyze</div><div class="mention-item" onclick="insertCommand(\'project status\')">project status</div><div class="mention-item" onclick="insertCommand(\'tasks\')">tasks</div><div class="mention-item" onclick="insertCommand(\'schedule\')">schedule</div><div class="mention-item" onclick="insertCommand(\'milestones\')">milestones</div><div class="mention-item" onclick="insertCommand(\'decisions\')">decisions</div><div class="mention-item" onclick="insertCommand(\'vote\')">vote [question]</div>';
     mentionDropdown.classList.remove('hidden');
   } else {
     mentionDropdown.classList.add('hidden');
@@ -1267,10 +1526,14 @@ async function deleteTask(taskId) {
   }
 }
 
-addTaskBtn.onclick = () => {
-  taskInput.classList.remove('hidden');
-  newTaskContent.focus();
-};
+if (addTaskBtn) {
+  addTaskBtn.onclick = () => {
+    taskInput.classList.remove('hidden');
+    newTaskContent.focus();
+  };
+} else {
+  console.error('addTaskBtn not found');
+}
 
 cancelTaskBtn.onclick = () => {
   taskInput.classList.add('hidden');
@@ -1771,6 +2034,111 @@ async function submitStartVote() {
     closeStartVoteModal();
   } catch (e) {
     alert('Failed to start vote: ' + e.message);
+  }
+}
+
+async function loadCurrentUserProfile() {
+  const username = localStorage.getItem('username');
+  if (!username) return;
+  
+  try {
+    const data = await callAPI('/users');
+    const user = data.users.find(u => u.username === username);
+    
+    // Set username
+    $("currentUsername").textContent = username;
+    
+    // Load saved avatar or show first letter
+    const savedAvatar = localStorage.getItem(`avatar_${username}`);
+    if (savedAvatar) {
+      $("userAvatar").style.backgroundImage = `url(${savedAvatar})`;
+      $("userAvatar").textContent = '';
+    } else {
+      $("userAvatar").textContent = username.charAt(0).toUpperCase();
+    }
+    
+    // Set role
+    if (user && user.role) {
+      const firstRole = user.role.split(',')[0].trim();
+      $("currentUserRole").textContent = firstRole;
+    } else {
+      $("currentUserRole").textContent = 'No role set';
+    }
+  } catch (e) {
+    console.error('Failed to load user profile:', e);
+  }
+}
+
+// Avatar upload handler
+if ($("avatarInput")) {
+  $("avatarInput").onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const username = localStorage.getItem('username');
+      const imageData = event.target.result;
+      localStorage.setItem(`avatar_${username}`, imageData);
+      $("userAvatar").style.backgroundImage = `url(${imageData})`;
+      $("userAvatar").textContent = '';
+    };
+    reader.readAsDataURL(file);
+  };
+}
+
+async function loadTeamRoles() {
+  try {
+    const data = await callAPI('/users');
+    const container = $("teamRoles");
+    if (!container) return;
+    container.innerHTML = "";
+    if (data.users.length === 0) {
+      container.innerHTML = '<div class="no-decisions">No team members</div>';
+    } else {
+      data.users.forEach(u => {
+        const el = document.createElement("div");
+        el.className = "sidebar-task";
+        el.style.background = "transparent";
+        const roles = u.role ? u.role.split(',').map(r => r.trim()) : [];
+        const rolesBadges = roles.length > 0 ? roles.map(r => `<span style="font-size:9px;background:#3b82f6;color:white;padding:2px 4px;border-radius:3px;margin-right:2px">${r}</span>`).join('') : '<span style="font-size:9px;opacity:0.5">No roles</span>';
+        el.innerHTML = `
+          <div style="display:flex;gap:4px;align-items:center;justify-content:space-between">
+            <div style="flex:1">
+              <div style="font-size:11px;font-weight:600">${u.username}</div>
+              <div style="margin-top:2px">${rolesBadges}</div>
+            </div>
+          </div>
+        `;
+        container.appendChild(el);
+      });
+    }
+  } catch (e) {
+    console.error("Failed to load team roles:", e);
+  }
+}
+
+function editMyRoles() {
+  const currentUser = localStorage.getItem('username');
+  callAPI('/users').then(data => {
+    const user = data.users.find(u => u.username === currentUser);
+    $("rolesInput").value = user?.role || '';
+    $("editRolesModal").classList.remove('hidden');
+  });
+}
+
+function closeEditRolesModal() {
+  $("editRolesModal").classList.add('hidden');
+}
+
+async function saveMyRoles() {
+  const roles = $("rolesInput").value.trim();
+  try {
+    await callAPI('/messages', 'POST', {content: `/role ${roles}`});
+    closeEditRolesModal();
+    await loadTeamRoles();
+  } catch (e) {
+    alert('Failed to save roles: ' + e.message);
   }
 }
 
