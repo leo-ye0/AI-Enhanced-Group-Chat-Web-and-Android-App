@@ -6,10 +6,6 @@ from datetime import datetime
 
 async def detect_meeting_request(message: str) -> dict:
     """Detect if message is a meeting request and extract details including attendees."""
-    indicators = ["schedule", "meeting", "call", "discuss", "review", "meet"]
-    if not any(ind in message.lower() for ind in indicators):
-        return None
-    
     # Extract Zoom link first using regex
     import re
     zoom_link = None
@@ -17,29 +13,24 @@ async def detect_meeting_request(message: str) -> dict:
     if zoom_match:
         zoom_link = zoom_match.group(0)
     
-    prompt = f"""Extract meeting details from this message. Extract EXACT usernames as they appear.
+    prompt = f"""Analyze if this is a CLEAR meeting scheduling request (not just mentioning meetings).
 
 Message: "{message}"
 
 Return ONLY a JSON object:
-{{"is_meeting": true, "title": "extracted topic", "date": "YYYY-MM-DD", "time": "HH:MM", "duration": 60, "attendees": "username1,username2"}}
+{{"is_meeting": true/false, "title": "extracted topic", "date": "YYYY-MM-DD", "time": "HH:MM", "duration": 60, "attendees": "username1,username2"}}
 
 Rules:
-- is_meeting: true if this is a meeting/schedule request
-- title: extract the ACTUAL meeting topic/purpose (NOT generic phrases like "schedule a meeting" or "schedule the meeting"). If no specific topic mentioned, use "Team Meeting"
-- date: YYYY-MM-DD format (extract from message like "tomorrow", "next Monday", specific dates, null if not mentioned)
-- time: HH:MM 24-hour format (extract from message like "2pm" = "14:00", null if not mentioned)
-- duration: extract duration in minutes (null if not mentioned)
-- attendees: extract EXACT usernames as written in message (e.g., "yutaoye", "leoye0", NOT "Yutao Ye" or "Leo"). NEVER include "bot" as an attendee.
+- is_meeting: true ONLY if user is actively trying to SCHEDULE/ARRANGE a meeting (not just mentioning meetings)
+- Examples of TRUE meeting requests: "let's schedule a meeting", "can we meet tomorrow", "schedule a call for 2pm", "Schedule team sync for Dec 15"
+- Examples of FALSE (not meeting requests): "meeting request detected", "in the meeting", "after the meeting", "meeting notes"
+- title: extract the ACTUAL meeting topic/purpose from the message (e.g., "team sync", "project review"). If no specific topic, use "Team Meeting"
+- date: Convert to YYYY-MM-DD format. Current year is {datetime.now().year}. Examples: "Dec 15" → "2025-12-15", "tomorrow" → calculate date
+- time: Convert to HH:MM 24-hour format. Examples: "2pm" → "14:00", "9:30am" → "09:30"
+- duration: extract duration in minutes (e.g., "60 minutes" → 60)
+- attendees: extract EXACT usernames as written (e.g., "alice bob" → "alice,bob"), NEVER include "bot" or "@bot"
 
-CRITICAL: 
-- Use lowercase usernames exactly as typed in the message, NOT real names or formatted names
-- NEVER include "bot" in the attendees list
-- For title, extract the PURPOSE/TOPIC of the meeting, NOT the action of scheduling
-- Examples: "schedule a meeting to discuss project" -> title: "Project Discussion"
-- Examples: "let's meet about the presentation" -> title: "Presentation Discussion"
-
-If not a meeting request: {{"is_meeting": false}}
+If not a meeting scheduling request: {{"is_meeting": false}}
 
 JSON:"""
     
@@ -67,7 +58,7 @@ JSON:"""
         print(f"Cleaned JSON: '{response}'")
         result = json.loads(response)
         print(f"Meeting detection result: {result}")
-        if result.get("is_meeting"):
+        if result.get("is_meeting") and result.get("is_meeting") is not False:
             # Only set datetime if date is provided
             datetime_str = None
             if result.get("date") and result.get("date") != "null":

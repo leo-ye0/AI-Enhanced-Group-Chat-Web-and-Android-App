@@ -636,7 +636,7 @@ Provide a brief, practical explanation focusing on project flow and timeline con
             # Assign existing task by ID
             task = await session.get(Task, int(assign_param))
             if task:
-                result = await assign_task_to_user(session, task.content, task.id, content)
+                result = await assign_task_to_user(session, task.content, task.id, content, group_id=payload.group_id)
                 due_date_text = f"\n📅 Due: {result['due_date']}" if result.get('due_date') else ""
                 reply_text = f"✅ Task assigned to **{result['assigned_to']}**{due_date_text}\n\n📋 Task: {task.content}\n\n💡 Reason: {result['reason']}"
                 await manager.broadcast({"type": "tasks_updated"})
@@ -644,7 +644,7 @@ Provide a brief, practical explanation focusing on project flow and timeline con
                 reply_text = f"❌ Task #{assign_param} not found"
         else:
             # Assign new task with natural language support
-            result = await assign_task_to_user(session, assign_param, None, content)
+            result = await assign_task_to_user(session, assign_param, None, content, group_id=payload.group_id)
             task = Task(
                 content=assign_param,
                 assigned_to=result['assigned_to'],
@@ -972,11 +972,16 @@ async def login(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
     async def send_summary():
         await asyncio.sleep(1)  # Wait for WebSocket connection
         async with SessionLocal() as new_session:
+            # Get user's last active group
+            user_res = await new_session.execute(select(User).where(User.username == payload.username))
+            user = user_res.scalar_one_or_none()
+            group_id = user.last_active_group_id if user else None
+            
             summary = await generate_login_summary(payload.username, new_session)
             # Remove any prefix like "Here's a brief welcome message for username:"
             import re
             summary = re.sub(r'^.*?welcome message.*?:\s*["\']?', '', summary, flags=re.IGNORECASE).strip('"\'')
-            bot_msg = Message(user_id=None, content=f"👋 {summary}", is_bot=True)
+            bot_msg = Message(user_id=None, content=f"👋 {summary}", is_bot=True, group_id=group_id)
             new_session.add(bot_msg)
             await new_session.commit()
             await new_session.refresh(bot_msg)
@@ -1163,7 +1168,7 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             assignee_hint = assignment.get('assignee')
             user_msg = payload.content if assignee_hint else None
             
-            result = await assign_task_to_user(session, task_desc, None, user_msg)
+            result = await assign_task_to_user(session, task_desc, None, user_msg, group_id=payload.group_id)
             
             # Create task with pending assignment (24h to accept)
             expires_at = datetime.now() + timedelta(hours=24)
@@ -1216,11 +1221,10 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             await manager.broadcast({"type": "tasks_updated"})
             return {"ok": True, "id": m.id}
     
-    # Check if bot should respond (commands or question keywords)
-    question_keywords = ["?", "what", "how", "why", "when", "where", "who", "which", "can", "could", "would", "should", "is", "are", "do", "does", "decisions", "explain", "tell me", "show me"]
+    # Check if bot should respond (only commands or @bot mention)
     should_respond = (
         payload.content.startswith("/") or
-        any(kw in payload.content.lower() for kw in question_keywords)
+        "@bot" in payload.content.lower()
     )
     
     # Always detect meetings, milestones, and ship date from non-command messages FIRST

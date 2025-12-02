@@ -19,20 +19,29 @@ class ConflictDetector:
     @staticmethod
     async def check_for_conflicts(user_statement: str) -> Optional[Dict]:
         """Check if user statement conflicts with uploaded documents."""
-        # Skip if not project-relevant
-        is_relevant = await ConflictDetector._is_project_relevant(user_statement)
-        if not is_relevant:
+        print(f"\n🔍 DIALECTIC ENGINE: Monitoring '{user_statement[:60]}...'")
+        
+        # Skip task/role assignments - these are operational, not strategic
+        task_keywords = ['assign', 'assigned', 'task for', 'give this to', 'can you do', 'responsible for']
+        if any(keyword in user_statement.lower() for keyword in task_keywords):
+            print("  ⏭️  Skipped: Task assignment (operational, not strategic)")
             return None
         
-        # Skip questions but allow vote requests to be processed normally
-        if user_statement.strip().endswith('?') and 'vote' not in user_statement.lower():
-            return None
+        # Skip pure questions (not proposals)
+        if user_statement.strip().endswith('?'):
+            rhetorical_indicators = ['i think', 'we should', 'let\'s', 'propose', 'suggest']
+            is_rhetorical = any(indicator in user_statement.lower() for indicator in rhetorical_indicators)
+            if not is_rhetorical:
+                print("  ⏭️  Skipped: Question (not a declarative statement)")
+                return None
         
         # Search for relevant documents with better query
         search_query = f"requirements specification {user_statement}"
+        print(f"  🔎 Searching for conflicts...")
         search_results = search_documents(search_query, n_results=5)
         
         if not search_results['documents'] or not search_results['documents'][0]:
+            print("  ✅ No conflicts found (no relevant docs)")
             return None
         
         # Find the most relevant document (prefer requirements/project docs)
@@ -56,42 +65,47 @@ class ConflictDetector:
             best_metadata = search_results['metadatas'][0][0]
         
         # Use LLM to intelligently detect conflicts
-        conflict_check_prompt = f"""You are an expert conflict detector. Analyze if the user's statement conflicts with the document evidence.
+        conflict_check_prompt = f"""You are a JSON-only conflict detector. Respond ONLY with valid JSON, no code, no explanations.
 
-User Statement: "{user_statement}"
+User statement: "{user_statement}"
+Document: "{best_doc}"
 
-Document Evidence: "{best_doc}"
-
-Look for conflicts such as:
-- Different technology choices (React vs Vue, Python vs Java, etc.)
-- Contradictory requirements or specifications
-- Different budget amounts, timelines, or constraints
-- Opposing methodologies or approaches
-- Conflicting technical parameters or limits
-
-A conflict exists when:
-- User proposes something different from what's documented
-- User suggests alternatives to documented decisions
-- User states requirements that contradict the document
-- User recommends approaches that differ from documented ones
-
-Respond with JSON only:
-{{"conflict": true/false, "severity": "low/medium/high", "reason": "specific explanation of the conflict"}}
+Conflict = user proposes different tech/time/amount/approach than document.
 
 Examples:
-- User: "use Vue" + Doc: "use React" = conflict: true
-- User: "budget $75k" + Doc: "budget $50k max" = conflict: true
-- User: "6 months" + Doc: "3 months timeline" = conflict: true
-"""
+- "use Streamlit" vs "use React" = conflict
+- "use Vue" vs "use React" = conflict  
+- "meeting 3pm" vs "meeting 2pm" = conflict
+- "budget $50k" vs "budget $30k" = conflict
+- "use React hooks" vs "use React" = no conflict
+
+Respond with ONLY this JSON (no markdown, no code blocks):
+{{"conflict": true, "severity": "high", "reason": "Streamlit vs React"}}
+
+Your JSON:"""
         
         try:
-            response = await chat_completion([{"role": "user", "content": conflict_check_prompt}], temperature=0.1)
+            response = await chat_completion([{"role": "user", "content": conflict_check_prompt}], temperature=0.0)
             
-            # Parse JSON response
+            # Parse JSON response - extract JSON if wrapped in markdown
             import json
-            conflict_data = json.loads(response.strip())
+            import re
             
+            # Remove markdown code blocks if present
+            json_match = re.search(r'\{[^}]+\}', response)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = response.strip()
+            
+            conflict_data = json.loads(json_str)
+            
+            print(f"  🤖 LLM: {conflict_data}")
             if conflict_data.get("conflict"):
+                print(f"  🚨 CONFLICT DETECTED!")
+                print(f"     Severity: {conflict_data.get('severity', 'medium').upper()}")
+                print(f"     Source: {best_metadata.get('filename', 'Unknown')}")
+                print(f"     Reason: {conflict_data.get('reason', 'Conflict detected')}")
                 return {
                     "user_statement": user_statement,
                     "conflicting_evidence": best_doc,
@@ -100,16 +114,17 @@ Examples:
                     "reason": conflict_data.get("reason", "Conflict detected"),
                     "metadata": best_metadata
                 }
+            else:
+                print(f"  ✅ No conflict (Doc: {best_doc[:80]}...)")
         except Exception as e:
-            print(f"Conflict detection error: {e}")
+            print(f"  ❌ Error: {e}")
+            print(f"     LLM response: {response if 'response' in locals() else 'N/A'}")
         
         return None
     
     @staticmethod
     async def _is_project_relevant(statement: str) -> bool:
-        """Check if statement is project-related based on uploaded documents."""
-        project_keywords = await ConflictDetector._get_dynamic_keywords()
-        
+        """Check if statement is project-related using smart LLM analysis."""
         casual_keywords = [
             'hello', 'hi', 'thanks', 'thank you', 'good morning', 'good afternoon',
             'how are you', 'what\'s up', 'see you', 'bye', 'goodbye',
@@ -118,25 +133,34 @@ Examples:
         
         statement_lower = statement.lower()
         
-        # Skip if clearly casual conversation (use word boundaries to avoid false matches)
+        # Skip if clearly casual conversation
         import re
         if any(re.search(r'\b' + re.escape(casual) + r'\b', statement_lower) for casual in casual_keywords):
             return False
         
-        # Check if contains project-relevant terms or is making factual claims
-        has_project_terms = any(keyword in statement_lower for keyword in project_keywords)
-        has_factual_claims = (
-            any(char.isdigit() for char in statement) or 
-            'must' in statement_lower or 'should' in statement_lower or
-            'expect' in statement_lower or 'perform' in statement_lower or
-            'equally' in statement_lower or 'identical' in statement_lower
-        )
+        # Skip very short messages
+        if len(statement.strip()) < 15:
+            return False
         
-        # Also check for common technology terms
-        tech_terms = ['react', 'vue', 'javascript', 'python', 'java', 'framework', 'technology', 'frontend', 'backend', 'database', 'api']
-        has_tech_terms = any(tech in statement_lower for tech in tech_terms)
+        # Use LLM to determine if statement is making a technical/project claim
+        relevance_prompt = f"""Is this statement making a technical, project-related, or decision-oriented claim?
+
+Statement: "{statement}"
+
+A statement is project-relevant if it:
+- Proposes a technology, tool, or approach
+- Makes claims about requirements, timelines, or budgets
+- Suggests methodologies or processes
+- States technical specifications or constraints
+
+Respond with only: YES or NO"""
         
-        return has_project_terms or has_factual_claims or has_tech_terms
+        try:
+            response = await chat_completion([{"role": "user", "content": relevance_prompt}], temperature=0.1)
+            return "yes" in response.lower()
+        except:
+            # Fallback to simple keyword check
+            return 'should' in statement_lower or 'must' in statement_lower or any(char.isdigit() for char in statement)
     
     @staticmethod
     async def _get_dynamic_keywords() -> List[str]:
@@ -288,7 +312,7 @@ async def get_voting_status_message(conflict_id: str, session) -> str:
 • Chat: `@bot decision {conflict_id} A [your reasoning]`
 • Sidebar: Click A/B/C buttons in Active Votes"""
 
-async def monitor_message_for_conflicts(message_content: str, message_id: int, session) -> Optional[Dict]:
+async def monitor_message_for_conflicts(message_content: str, message_id: int, session, group_id: int = None) -> Optional[Dict]:
     """
     Silent observer: Check message for conflicts without responding unless conflict found.
     Returns conflict data if intervention needed.
@@ -320,7 +344,8 @@ async def monitor_message_for_conflicts(message_content: str, message_id: int, s
             source_file=conflict['source_file'],
             severity=ConflictSeverity(conflict['severity']),
             reason=conflict['reason'],
-            expires_at=expires_at
+            expires_at=expires_at,
+            group_id=group_id
         )
         
         session.add(active_conflict)
@@ -328,6 +353,9 @@ async def monitor_message_for_conflicts(message_content: str, message_id: int, s
         
         # Generate intervention with unique ID
         intervention = await SocraticInterventionGenerator.generate_intervention(conflict, conflict_id)
+        
+        print(f"\n📢 INTERVENTION SENT: Conflict ID {conflict_id}")
+        print(f"   Team must vote: A/B/C within 24 hours")
         
         return {
             "conflict_id": conflict_id,

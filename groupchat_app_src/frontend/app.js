@@ -646,9 +646,17 @@ window.deleteTask = async function(taskId) {
 async function loadArchivedTasks() {
   try {
     const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
-    const [tasksData, usersData] = await Promise.all([callAPI(`/tasks${params}`), callAPI("/users")]);
+    const tasksData = await callAPI(`/tasks${params}`);
     const tasks = tasksData.tasks.filter(t => t.status === 'completed').slice(0, 10);
-    const users = usersData.users;
+    
+    let users = [];
+    if (currentGroupId) {
+      const groupData = await callAPI(`/groups/${currentGroupId}/members`);
+      users = groupData.members;
+    } else {
+      const usersData = await callAPI("/users");
+      users = usersData.users;
+    }
     const list = $("sidebarArchived");
     if (!list) return;
     list.innerHTML = "";
@@ -688,9 +696,17 @@ async function loadArchivedTasks() {
 async function loadSidebarTasks() {
   try {
     const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
-    const [tasksData, usersData] = await Promise.all([callAPI(`/tasks${params}`), callAPI("/users")]);
+    const tasksData = await callAPI(`/tasks${params}`);
     const tasks = tasksData.tasks.filter(t => t.status === 'pending').slice(0, 5);
-    const users = usersData.users;
+    
+    let users = [];
+    if (currentGroupId) {
+      const groupData = await callAPI(`/groups/${currentGroupId}/members`);
+      users = groupData.members;
+    } else {
+      const usersData = await callAPI("/users");
+      users = usersData.users;
+    }
     const list = $("sidebarTasks");
     if (!list) return;
     list.innerHTML = "";

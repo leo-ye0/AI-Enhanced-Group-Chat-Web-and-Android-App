@@ -20,6 +20,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(50), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(100), nullable=True)
+    last_active_group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
     messages = relationship("Message", back_populates="user")
     files = relationship("UploadedFile", back_populates="user")
@@ -30,6 +31,7 @@ class Message(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
     content: Mapped[str] = mapped_column(Text())
     is_bot: Mapped[bool] = mapped_column(Boolean(), default=False)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
     user = relationship("User", back_populates="messages")
 
@@ -42,6 +44,7 @@ class UploadedFile(Base):
     content: Mapped[str] = mapped_column(Text())
     file_data: Mapped[str] = mapped_column(LONGTEXT)
     summary: Mapped[str] = mapped_column(Text(), nullable=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
     user = relationship("User", back_populates="files")
 
@@ -59,6 +62,7 @@ class Task(Base):
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.pending)
     pending_assignment: Mapped[bool] = mapped_column(Boolean(), default=False)
     assignment_expires_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), nullable=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class Meeting(Base):
@@ -71,6 +75,7 @@ class Meeting(Base):
     transcript_file_id: Mapped[int] = mapped_column(ForeignKey("uploaded_files.id", ondelete="SET NULL"), nullable=True)
     attendees: Mapped[str] = mapped_column(Text(), nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class DecisionOption(enum.Enum):
@@ -83,6 +88,7 @@ class ProjectSettings(Base):
     __tablename__ = "project_settings"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ship_date: Mapped[str] = mapped_column(String(100), nullable=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     updated_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 class Milestone(Base):
@@ -93,6 +99,7 @@ class Milestone(Base):
     start_date: Mapped[str] = mapped_column(String(100))
     end_date: Mapped[str] = mapped_column(String(100))
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class Decision(Base):
@@ -126,6 +133,7 @@ class DecisionLog(Base):
     decision_type: Mapped[DecisionType] = mapped_column(Enum(DecisionType))
     created_by: Mapped[str] = mapped_column(String(100))  # User ID or "AI_Agent"
     chat_reference_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), nullable=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class ConflictSeverity(enum.Enum):
@@ -145,6 +153,7 @@ class ActiveConflict(Base):
     reason: Mapped[str] = mapped_column(Text())
     expires_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True))
     is_resolved: Mapped[bool] = mapped_column(Boolean(), default=False)
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 class ConflictVote(Base):
@@ -161,6 +170,23 @@ class ConflictVote(Base):
         # Ensure one vote per user per conflict
         {'mysql_engine': 'InnoDB', 'mysql_charset': 'utf8mb4'},
     )
+
+class Group(Base):
+    """Groups for organizing conversations"""
+    __tablename__ = "groups"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class GroupMembership(Base):
+    """User membership in groups"""
+    __tablename__ = "group_memberships"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(100), nullable=True)
+    joined_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
