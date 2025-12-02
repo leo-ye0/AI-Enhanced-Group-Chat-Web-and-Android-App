@@ -1,5 +1,67 @@
 const $ = (id) => document.getElementById(id);
 
+const toggleLeftNavBtn = $("toggleLeftNav");
+if (toggleLeftNavBtn) {
+  toggleLeftNavBtn.onclick = () => {
+    const leftNav = $("leftNav");
+    const container = document.querySelector('.container');
+    const leftResize = $("leftResize");
+    leftNav.classList.toggle('hidden');
+    container.classList.toggle('left-nav-hidden');
+    if (leftResize) leftResize.style.display = leftNav.classList.contains('hidden') ? 'none' : 'block';
+  };
+}
+
+// Resize functionality
+let isResizing = false;
+let currentHandle = null;
+
+function initResize(handleId) {
+  const handle = $(handleId);
+  if (!handle) return;
+  
+  handle.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    currentHandle = handleId;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+}
+
+document.addEventListener('mousemove', (e) => {
+  if (!isResizing) return;
+  
+  if (currentHandle === 'leftResize') {
+    const newWidth = Math.max(150, Math.min(400, e.clientX));
+    const leftNav = $("leftNav");
+    const leftResize = $("leftResize");
+    const container = document.querySelector('.container');
+    if (leftNav) leftNav.style.width = newWidth + 'px';
+    if (leftResize) leftResize.style.left = newWidth + 'px';
+    if (container) container.style.marginLeft = newWidth + 'px';
+  } else if (currentHandle === 'rightResize') {
+    const newWidth = Math.max(200, Math.min(500, window.innerWidth - e.clientX));
+    const rightSidebar = $("rightSidebar");
+    const rightResize = $("rightResize");
+    const container = document.querySelector('.container');
+    if (rightSidebar) rightSidebar.style.width = newWidth + 'px';
+    if (rightResize) rightResize.style.right = newWidth + 'px';
+    if (container) container.style.marginRight = newWidth + 'px';
+  }
+});
+
+document.addEventListener('mouseup', () => {
+  if (isResizing) {
+    isResizing = false;
+    currentHandle = null;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }
+});
+
+initResize('leftResize');
+initResize('rightResize');
+
 const authPanel = $("auth");
 const chatPanel = $("chat");
 const messagesDiv = $("messages");
@@ -15,6 +77,8 @@ const uploadBtn = $("uploadBtn");
 const fileInput = $("fileInput");
 const chatInput = $("chatInput");
 const sendBtn = $("sendBtn");
+const toneDropdown = $("toneDropdown");
+const llmToneDropdown = $("llmToneDropdown");
 const fileList = $("fileList");
 const filePreview = $("filePreview");
 const previewTitle = $("previewTitle");
@@ -89,6 +153,7 @@ function showChat() {
   chatPanel.classList.remove("hidden");
   $("leftNav").classList.remove("hidden");
   $("rightSidebar").classList.remove("hidden");
+  $("chat").querySelector('h2').textContent = currentGroupName;
   loadCurrentUserProfile();
   loadDecisions();
   loadGroupBrain();
@@ -97,6 +162,7 @@ function showChat() {
   loadProjectPulse();
   loadActiveConflicts();
   loadTeamRoles();
+  loadGroups();
   
   setTimeout(() => {
     if ($("expandMeetings")) {
@@ -175,7 +241,7 @@ function showChat() {
         const content = input?.value.trim();
         if (!content) return;
         try {
-          const payload = {content};
+          const payload = {content, group_id: currentGroupId};
           if (dueDateInput?.value) payload.due_date = dueDateInput.value;
           if (assigneeInput?.value) payload.assigned_to = assigneeInput.value;
           await callAPI('/tasks', 'POST', payload);
@@ -221,8 +287,14 @@ async function addMessage(m) {
   let displayName = m.username || "unknown";
   if (!m.is_bot && m.username && m.username !== "unknown") {
     try {
-      const usersData = await callAPI('/users');
-      const user = usersData.users.find(u => u.username === m.username);
+      let user;
+      if (currentGroupId) {
+        const groupData = await callAPI(`/groups/${currentGroupId}/members`);
+        user = groupData.members.find(u => u.username === m.username);
+      } else {
+        const usersData = await callAPI('/users');
+        user = usersData.users.find(u => u.username === m.username);
+      }
       if (user && user.role) {
         const firstRole = user.role.split(',')[0].trim();
         displayName = `${m.username} (${firstRole})`;
@@ -250,14 +322,18 @@ async function addMessage(m) {
 }
 
 async function loadMessages() {
-  const data = await callAPI("/messages");
+  const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+  console.log('loadMessages: currentGroupId=', currentGroupId, 'params=', params);
+  const data = await callAPI(`/messages${params}`);
+  console.log('loadMessages: received', data.messages.length, 'messages');
   messagesDiv.innerHTML = "";
   for (const m of data.messages) await addMessage(m);
 }
 
 async function loadFiles() {
   try {
-    const data = await callAPI("/files");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/files${params}`);
     fileList.innerHTML = "";
     if (data.files.length === 0) {
       fileList.innerHTML = '<div class="no-files">No files uploaded yet</div>';
@@ -319,6 +395,11 @@ function connectWS() {
         if (data.message.content && data.message.content.includes('Your role has been set to:')) {
           loadTeamRoles();
           loadCurrentUserProfile();
+          loadProjectPulse();
+          loadNextMeeting();
+          loadSidebarTasks();
+          loadDecisions();
+          loadActiveConflicts();
         }
       }
       if (data.type === "clear") messagesDiv.innerHTML = "";
@@ -326,9 +407,9 @@ function connectWS() {
         console.log('Received tasks_updated event, reloading tasks...');
         loadTasks();
         loadSidebarTasks();
-        const tasksSection = $("sidebarTasks");
-        if (tasksSection && tasksSection.style.display === 'none') {
-          tasksSection.style.display = '';
+        const tasksDecisionsContent = $("tasksDecisionsContent");
+        if (tasksDecisionsContent && tasksDecisionsContent.style.display === 'none') {
+          tasksDecisionsContent.style.display = '';
         }
         if ($("tasksTab") && !$("tasksTab").classList.contains('active')) {
           $("tasksTab").click();
@@ -431,7 +512,8 @@ logoutBtn.onclick = () => {
 
 async function loadDecisions() {
   try {
-    const data = await callAPI("/decision-log");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/decision-log${params}`);
     const log = $("sidebarDecisions");
     if (!log) return;
     log.innerHTML = "";
@@ -563,7 +645,8 @@ window.deleteTask = async function(taskId) {
 
 async function loadArchivedTasks() {
   try {
-    const [tasksData, usersData] = await Promise.all([callAPI("/tasks"), callAPI("/users")]);
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const [tasksData, usersData] = await Promise.all([callAPI(`/tasks${params}`), callAPI("/users")]);
     const tasks = tasksData.tasks.filter(t => t.status === 'completed').slice(0, 10);
     const users = usersData.users;
     const list = $("sidebarArchived");
@@ -604,7 +687,8 @@ async function loadArchivedTasks() {
 
 async function loadSidebarTasks() {
   try {
-    const [tasksData, usersData] = await Promise.all([callAPI("/tasks"), callAPI("/users")]);
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const [tasksData, usersData] = await Promise.all([callAPI(`/tasks${params}`), callAPI("/users")]);
     const tasks = tasksData.tasks.filter(t => t.status === 'pending').slice(0, 5);
     const users = usersData.users;
     const list = $("sidebarTasks");
@@ -672,7 +756,8 @@ let pulseExpanded = false;
 
 async function loadNextMeeting() {
   try {
-    const data = await callAPI("/meetings");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/meetings${params}`);
     const now = new Date();
     const upcoming = data.meetings.filter(m => new Date(m.datetime) > now).sort((a,b) => new Date(a.datetime) - new Date(b.datetime));
     const container = $("sidebarMeetings");
@@ -713,7 +798,8 @@ async function loadNextMeeting() {
 
 async function editMeetingSidebar(meetingId) {
   try {
-    const data = await callAPI("/meetings");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/meetings${params}`);
     const meeting = data.meetings.find(m => m.id === meetingId);
     if (!meeting) return;
     await populateMeetingAttendees();
@@ -800,9 +886,10 @@ let brainSummariesVisible = true;
 
 async function loadProjectPulse() {
   try {
-    const tasks = await callAPI("/tasks");
-    const milestonesData = await callAPI("/milestones");
-    const shipDateData = await callAPI("/project/ship-date");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const tasks = await callAPI(`/tasks${params}`);
+    const milestonesData = await callAPI(`/milestones${params}`);
+    const shipDateData = await callAPI(`/project/ship-date${params}`);
     
     if (!milestonesData.milestones || milestonesData.milestones.length === 0) {
       const shipDateHtml = `<input type="date" id="shipDateEdit" value="${shipDateData.ship_date || ''}" onchange="updateShipDate(this.value)" placeholder="Set ship date" style="width:100%;padding:6px;margin-bottom:8px;border:1px solid #374151;border-radius:4px;background:#0b1220;color:#e2e8f0;font-size:11px">`;
@@ -871,7 +958,8 @@ async function suggestMilestones() {
   try {
     const shipDateInput = $("shipDateInput");
     if (shipDateInput && shipDateInput.value) {
-      await callAPI("/project/ship-date", "POST", {ship_date: shipDateInput.value});
+      const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+      await callAPI(`/project/ship-date${params}`, "POST", {ship_date: shipDateInput.value});
     }
     
     $("projectPulse").innerHTML = '<div class="pulse-content">AI generating milestones...</div>';
@@ -990,8 +1078,8 @@ async function acceptMilestone(index) {
 
 async function acceptAllMilestones(milestones) {
   try {
-    await callAPI('/milestones/bulk', 'POST', milestones);
-    await callAPI('/messages', 'POST', {content: `Accepted all ${milestones.length} suggested milestones`});
+    await callAPI(`/milestones/bulk?group_id=${currentGroupId || ''}`, 'POST', milestones);
+    await callAPI('/messages', 'POST', {content: `Accepted all ${milestones.length} suggested milestones`, group_id: currentGroupId});
     window.suggestedMilestones = null;
   } catch (e) {
     alert('Failed to add milestones: ' + e.message);
@@ -1039,7 +1127,8 @@ async function saveMilestoneEdit() {
 
 async function editSingleMilestone(milestoneId) {
   try {
-    const data = await callAPI('/milestones');
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/milestones${params}`);
     const milestone = data.milestones.find(m => m.id === milestoneId);
     if (!milestone) return;
     
@@ -1056,7 +1145,8 @@ async function editSingleMilestone(milestoneId) {
 
 async function editMilestones() {
   try {
-    const data = await callAPI('/milestones');
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/milestones${params}`);
     if (data.milestones.length === 0) {
       suggestMilestones();
       return;
@@ -1113,7 +1203,8 @@ function closeClearMilestonesModal() {
 
 async function confirmClearMilestones() {
   try {
-    const data = await callAPI('/milestones');
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/milestones${params}`);
     for (const m of data.milestones) {
       await callAPI(`/milestones/${m.id}`, 'DELETE');
     }
@@ -1134,7 +1225,8 @@ function editShipDate() {
 
 async function updateShipDate(shipDate) {
   try {
-    await callAPI('/project/ship-date', 'POST', {ship_date: shipDate});
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    await callAPI(`/project/ship-date${params}`, 'POST', {ship_date: shipDate});
     await loadProjectPulse();
   } catch (e) {
     alert('Failed to update ship date: ' + e.message);
@@ -1143,9 +1235,9 @@ async function updateShipDate(shipDate) {
 
 async function runProjectAnalyze() {
   try {
-    await callAPI('/messages', 'POST', {content: '/project analyze'});
+    await callAPI('/messages', 'POST', {content: '/project analyze', group_id: currentGroupId});
   } catch (e) {
-    alert('Failed to run project analyze: ' + e.message);
+    console.error('Failed to run project analyze:', e);
   }
 }
 
@@ -1156,7 +1248,8 @@ async function generateMilestonesDirectly() {
 
 async function loadGroupBrain() {
   try {
-    const data = await callAPI("/files");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/files${params}`);
     const brain = $("groupBrain");
     brain.innerHTML = "";
     if (data.files.length === 0) {
@@ -1212,6 +1305,7 @@ setTimeout(() => {
       
       const formData = new FormData();
       formData.append('file', file);
+      if (currentGroupId) formData.append('group_id', currentGroupId);
       
       try {
         const response = await fetch(API + '/upload', {
@@ -1312,7 +1406,13 @@ const sendMessage = async () => {
   sendBtn.disabled = true;
   try {
     const content = botAlwaysOn && !text.startsWith("/") && !text.includes("@bot") ? "@bot " + text : text;
-    await callAPI("/messages", "POST", {content});
+    const tone = toneDropdown && toneDropdown.value !== 'none' ? toneDropdown.value : null;
+    const llmTone = llmToneDropdown && llmToneDropdown.value !== 'none' ? llmToneDropdown.value : null;
+    const payload = {content, group_id: currentGroupId === null ? null : currentGroupId};
+    if (tone) payload.tone = tone;
+    if (llmTone) payload.llm_tone = llmTone;
+    console.log('Sending message with payload:', payload);
+    await callAPI("/messages", "POST", payload);
   } finally {
     sendBtn.disabled = false;
   }
@@ -1344,6 +1444,7 @@ fileInput.onchange = async (e) => {
   
   const formData = new FormData();
   formData.append('file', file);
+  if (currentGroupId) formData.append('group_id', currentGroupId);
   
   try {
     uploadBtn.disabled = true;
@@ -1403,7 +1504,8 @@ toggleSummaries.onclick = () => {
 async function loadTasks() {
   try {
     console.log('loadTasks() called');
-    const data = await callAPI("/tasks");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/tasks${params}`);
     console.log('Received tasks:', data.tasks.length);
     let tasks = data.tasks;
     
@@ -1555,7 +1657,8 @@ saveTaskBtn.onclick = async () => {
 
 async function loadMeetings() {
   try {
-    const data = await callAPI("/meetings");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/meetings${params}`);
     meetingList.innerHTML = "";
     if (data.meetings.length === 0) {
       meetingList.innerHTML = '<div class="no-meetings">No meetings scheduled</div>';
@@ -1717,7 +1820,7 @@ setTimeout(() => {
   }
 }, 100);
 
-createMeetingBtn.onclick = async () => {
+const originalCreateMeetingHandler = async () => {
   if (currentMeetingId && createMeetingBtn.textContent === 'Update Meeting') {
     return;
   }
@@ -1734,7 +1837,7 @@ createMeetingBtn.onclick = async () => {
     return;
   }
   try {
-    const result = await callAPI('/meetings', 'POST', {title, datetime, duration_minutes: duration, zoom_link});
+    const result = await callAPI('/meetings', 'POST', {title, datetime, duration_minutes: duration, zoom_link, group_id: currentGroupId});
     currentMeetingId = result.id;
     
     const selectedAttendees = Array.from($("meetingAttendeeCheckboxes").querySelectorAll('input:checked')).map(cb => cb.value);
@@ -1752,7 +1855,7 @@ createMeetingBtn.onclick = async () => {
       suggestedTimes.innerHTML = '';
       uploadTranscriptBtn.style.display = 'none';
       createMeetingBtn.textContent = 'Create Meeting';
-      createMeetingBtn.onclick = arguments.callee.caller;
+      createMeetingBtn.onclick = originalCreateMeetingHandler;
       currentMeetingId = null;
     };
     await loadMeetings();
@@ -1761,6 +1864,7 @@ createMeetingBtn.onclick = async () => {
     alert('Failed to create meeting: ' + e.message);
   }
 };
+createMeetingBtn.onclick = originalCreateMeetingHandler;
 
 uploadTranscriptBtn.onclick = () => {
   transcriptInput.click();
@@ -1905,7 +2009,8 @@ saveZoomLinkBtn.onclick = async () => {
 
 async function loadActiveConflicts() {
   try {
-    const data = await callAPI("/active-conflicts");
+    const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+    const data = await callAPI(`/active-conflicts${params}`);
     const container = $("activeConflicts");
     if (!container) return;
     
@@ -2001,7 +2106,8 @@ async function submitVote() {
     
     // Also send to chat for transparency
     await callAPI('/messages', 'POST', {
-      content: `@bot decision ${currentVoteConflictId} ${currentVoteOption} ${reasoning}`
+      content: `@bot decision ${currentVoteConflictId} ${currentVoteOption} ${reasoning}`,
+      group_id: currentGroupId
     });
     
     closeVoteModal();
@@ -2029,7 +2135,8 @@ async function submitStartVote() {
   
   try {
     await callAPI('/messages', 'POST', {
-      content: `/vote ${question}`
+      content: `/vote ${question}`,
+      group_id: currentGroupId
     });
     closeStartVoteModal();
   } catch (e) {
@@ -2057,13 +2164,25 @@ async function loadCurrentUserProfile() {
       $("userAvatar").textContent = username.charAt(0).toUpperCase();
     }
     
-    // Set role
-    if (user && user.role) {
-      const firstRole = user.role.split(',')[0].trim();
-      $("currentUserRole").textContent = firstRole;
-    } else {
-      $("currentUserRole").textContent = 'No role set';
+    // Set role - use group-specific role if in a group
+    let roleText = 'No role set';
+    if (currentGroupId) {
+      try {
+        const groupData = await callAPI(`/groups/${currentGroupId}/members`);
+        const member = groupData.members.find(m => m.username === username);
+        if (member && member.role) {
+          roleText = member.role.split(',')[0].trim();
+        }
+      } catch (e) {
+        // Fallback to global role
+        if (user && user.role) {
+          roleText = user.role.split(',')[0].trim();
+        }
+      }
+    } else if (user && user.role) {
+      roleText = user.role.split(',')[0].trim();
     }
+    $("currentUserRole").textContent = roleText;
   } catch (e) {
     console.error('Failed to load user profile:', e);
   }
@@ -2089,7 +2208,13 @@ if ($("avatarInput")) {
 
 async function loadTeamRoles() {
   try {
-    const data = await callAPI('/users');
+    let data;
+    if (currentGroupId) {
+      data = await callAPI(`/groups/${currentGroupId}/members`);
+      data = {users: data.members};
+    } else {
+      data = await callAPI('/users');
+    }
     const container = $("teamRoles");
     if (!container) return;
     container.innerHTML = "";
@@ -2134,7 +2259,7 @@ function closeEditRolesModal() {
 async function saveMyRoles() {
   const roles = $("rolesInput").value.trim();
   try {
-    await callAPI('/messages', 'POST', {content: `/role ${roles}`});
+    await callAPI('/messages', 'POST', {content: `/role ${roles}`, group_id: currentGroupId});
     closeEditRolesModal();
     await loadTeamRoles();
   } catch (e) {
@@ -2167,11 +2292,159 @@ async function clearDecisions() {
   }
 }
 
+let currentGroupId = localStorage.getItem('currentGroupId') && localStorage.getItem('currentGroupId') !== 'null' ? parseInt(localStorage.getItem('currentGroupId')) : null;
+let currentGroupName = localStorage.getItem('currentGroupName') || 'OmniPal Chat';
+
+async function loadGroups() {
+  try {
+    const data = await callAPI('/groups');
+    const container = $("groupsContainer");
+    container.innerHTML = "";
+    if (data.groups.length === 0) {
+      container.innerHTML = '<div style="font-size:11px;opacity:0.5;padding:8px 0">No groups yet</div>';
+    } else {
+      data.groups.forEach(g => {
+        const el = document.createElement("div");
+        const isActive = currentGroupId == g.id;
+        el.style.cssText = `padding:8px;margin:4px 0;background:${isActive ? '#10a37f' : '#ffffff'};color:${isActive ? '#fff' : '#000'};border-radius:4px;cursor:pointer;font-size:12px`;
+        el.textContent = g.name;
+        el.onclick = () => switchToGroup(g.id, g.name);
+        container.appendChild(el);
+      });
+    }
+    const browseBtn = document.createElement('button');
+    browseBtn.textContent = '🔍 Browse All Groups';
+    browseBtn.style.cssText = 'width:100%;padding:6px;margin-top:8px;background:#6b7280;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px';
+    browseBtn.onclick = browseAllGroups;
+    container.appendChild(browseBtn);
+  } catch (e) {
+    console.error('Failed to load groups:', e);
+  }
+}
+
+function toggleGroups() {
+  const groupsList = $("groupsList");
+  if (groupsList.classList.contains('hidden')) {
+    groupsList.classList.remove('hidden');
+    loadGroups();
+  } else {
+    groupsList.classList.add('hidden');
+  }
+}
+
+function createNewGroup() {
+  const name = prompt('Enter group name:');
+  if (!name) return;
+  callAPI('/groups', 'POST', {name}).then(async (res) => {
+    await loadGroups();
+    switchToGroup(res.id, name);
+  }).catch(e => alert('Failed to create group: ' + e.message));
+}
+
+async function switchToGroup(groupId, groupName) {
+  currentGroupId = groupId;
+  currentGroupName = groupName;
+  if (groupId === null) {
+    localStorage.removeItem('currentGroupId');
+    localStorage.removeItem('currentGroupName');
+  } else {
+    localStorage.setItem('currentGroupId', groupId);
+    localStorage.setItem('currentGroupName', groupName);
+  }
+  await callAPI('/user/last-active-group', 'POST', {group_id: groupId});
+  $("chat").querySelector('h2').textContent = groupName;
+  loadMessages();
+  loadFiles();
+  loadGroupBrain();
+  loadSidebarTasks();
+  loadNextMeeting();
+  loadProjectPulse();
+  loadDecisions();
+  loadActiveConflicts();
+  loadTeamRoles();
+  loadCurrentUserProfile();
+  loadGroups();
+}
+
+async function browseAllGroups() {
+  try {
+    const data = await callAPI('/groups/all');
+    const myGroups = await callAPI('/groups');
+    const myGroupIds = myGroups.groups.map(g => g.id);
+    
+    let html = '<div style="padding:12px;background:#fff;border-radius:8px;max-height:300px;overflow:auto">';
+    html += '<h3 style="margin:0 0 12px 0;font-size:14px">All Groups</h3>';
+    data.groups.forEach(g => {
+      const isMember = myGroupIds.includes(g.id);
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;margin:4px 0;background:#f9fafb;border-radius:4px">`;
+      html += `<span style="font-size:12px">${g.name}</span>`;
+      if (isMember) {
+        html += `<span style="font-size:10px;color:#10a37f">✓ Joined</span>`;
+      } else {
+        html += `<button onclick="joinGroup(${g.id}, '${g.name}')" style="padding:4px 8px;background:#10a37f;color:white;border:none;border-radius:3px;cursor:pointer;font-size:10px">Join</button>`;
+      }
+      html += '</div>';
+    });
+    html += '<button onclick="closeBrowseGroups()" style="width:100%;padding:8px;margin-top:8px;background:#6b7280;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px">Close</button>';
+    html += '</div>';
+    
+    const modal = document.createElement('div');
+    modal.id = 'browseGroupsModal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:1000;display:flex;align-items:center;justify-content:center';
+    modal.innerHTML = html;
+    document.body.appendChild(modal);
+  } catch (e) {
+    alert('Failed to load groups: ' + e.message);
+  }
+}
+
+function closeBrowseGroups() {
+  const modal = document.getElementById('browseGroupsModal');
+  if (modal) modal.remove();
+}
+
+async function joinGroup(groupId, groupName) {
+  try {
+    await callAPI(`/groups/${groupId}/join`, 'POST');
+    closeBrowseGroups();
+    await loadGroups();
+    switchToGroup(groupId, groupName);
+  } catch (e) {
+    alert('Failed to join group: ' + e.message);
+  }
+}
+
 if (token) {
-  Promise.all([loadMessages(), loadFiles(), loadTasks(), loadMeetings(), loadUserFilter()]).then(()=>{
+  callAPI('/user/last-active-group').then(async data => {
+    if (data.group_id) {
+      currentGroupId = data.group_id;
+      currentGroupName = data.group_name;
+      localStorage.setItem('currentGroupId', data.group_id);
+      localStorage.setItem('currentGroupName', data.group_name);
+      $("chat").querySelector('h2').textContent = data.group_name;
+    } else {
+      const groupsData = await callAPI('/groups');
+      if (groupsData.groups.length > 0) {
+        currentGroupId = groupsData.groups[0].id;
+        currentGroupName = groupsData.groups[0].name;
+        localStorage.setItem('currentGroupId', currentGroupId);
+        localStorage.setItem('currentGroupName', currentGroupName);
+        await callAPI('/user/last-active-group', 'POST', {group_id: currentGroupId});
+        $("chat").querySelector('h2').textContent = currentGroupName;
+      } else {
+        currentGroupId = null;
+        currentGroupName = 'OmniPal Chat';
+        $("chat").querySelector('h2').textContent = 'OmniPal Chat';
+      }
+    }
+    return Promise.all([loadMessages(), loadFiles(), loadTasks(), loadMeetings(), loadUserFilter()]);
+  }).then(()=>{
     connectWS();
     showChat();
-  }).catch(()=>showAuth());
+  }).catch((e)=>{
+    console.error('Initialization error:', e);
+    showAuth();
+  });
 } else {
   showAuth();
 }

@@ -4,7 +4,7 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +13,7 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from dotenv import load_dotenv
 
-from db import SessionLocal, init_db, User, Message, UploadedFile, Task, TaskStatus, Meeting, ProjectSettings, Decision, Milestone, ProjectSettings, DecisionLog, DecisionCategory, DecisionType, ActiveConflict, ConflictVote
+from db import SessionLocal, init_db, User, Message, UploadedFile, Task, TaskStatus, Meeting, ProjectSettings, Decision, Milestone, ProjectSettings, DecisionLog, DecisionCategory, DecisionType, ActiveConflict, ConflictVote, Group, GroupMembership
 from auth import get_password_hash, verify_password, create_access_token, get_current_user_token
 from websocket_manager import ConnectionManager
 from llm import chat_completion
@@ -34,6 +34,8 @@ from task_assigner import assign_task_to_user
 from role_normalizer import normalize_role
 from task_manager import detect_task_action
 from task_assignment_detector import detect_task_assignment
+from tone_adjuster import adjust_tone, TONES
+from user_preferences import set_user_tone, get_user_tone
 
 load_dotenv()
 
@@ -66,6 +68,9 @@ class AuthPayload(BaseModel):
 
 class MessagePayload(BaseModel):
     content: str
+    group_id: Optional[int] = None
+    tone: Optional[str] = None
+    llm_tone: Optional[str] = None
 
 # --------- Dependencies ---------
 async def get_db() -> AsyncSession:
@@ -159,7 +164,7 @@ async def extract_and_save_tasks(session: AsyncSession, content: str, message_id
         return True
     return False
 
-async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_id: int) -> bool:
+async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_id: int, group_id: int = None) -> bool:
     """Detect meeting requests and auto-create meeting with extracted details. Returns True if handled."""
     print(f"detect_and_suggest_meeting called with content: {content}")
     
@@ -168,8 +173,16 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
         import re
         meeting_data = waiting_for_meeting_info[user_id]
         
+        # Try to parse zoom link FIRST and remove it from content
+        content_without_url = content
+        if not meeting_data.get('zoom_link'):
+            zoom_match = re.search(r'https?://[^\s]+', content, re.IGNORECASE)
+            if zoom_match:
+                meeting_data['zoom_link'] = zoom_match.group(0)
+                content_without_url = content.replace(zoom_match.group(0), '').strip()
+        
         # Try to parse datetime
-        datetime_match = re.search(r'(\d{4}-\d{2}-\d{2})[,\s]+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', content, re.IGNORECASE)
+        datetime_match = re.search(r'(\d{4}-\d{2}-\d{2})[,\s]+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', content_without_url, re.IGNORECASE)
         if datetime_match and not meeting_data.get('datetime'):
             date_str = datetime_match.group(1)
             time_str = datetime_match.group(2).strip()
@@ -191,14 +204,6 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
                 time_str = f"{time_str}:00"
             
             meeting_data['datetime'] = f"{date_str}T{time_str}"
-        
-        # Try to parse zoom link FIRST and remove it from content
-        content_without_url = content
-        if not meeting_data.get('zoom_link'):
-            zoom_match = re.search(r'https?://[^\s]+', content, re.IGNORECASE)
-            if zoom_match:
-                meeting_data['zoom_link'] = zoom_match.group(0)
-                content_without_url = content.replace(zoom_match.group(0), '').strip()
         
         # Try to parse duration (e.g., "60 minutes", "1 hour", "30min")
         duration_match = re.search(r'(\d+)\s*(?:min|minute|minutes|hour|hours|hrs?)', content_without_url, re.IGNORECASE)
@@ -234,7 +239,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
                 duration_minutes=meeting_data.get('duration', 60),
                 zoom_link=meeting_data.get('zoom_link'),
                 attendees=meeting_data.get('attendees'),
-                created_by=user_id
+                created_by=user_id,
+                group_id=group_id
             )
             session.add(meeting)
             await session.commit()
@@ -246,7 +252,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
             bot_msg = Message(
                 user_id=None,
                 content=f"✅ Meeting created: **{meeting.title}** on {meeting.datetime.split('T')[0]} at {meeting.datetime.split('T')[1]}{attendees_str}.",
-                is_bot=True
+                is_bot=True,
+                group_id=group_id
             )
             session.add(bot_msg)
             await session.commit()
@@ -272,7 +279,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
             bot_msg = Message(
                 user_id=None,
                 content=f"Missing: {missing_str}",
-                is_bot=True
+                is_bot=True,
+                group_id=group_id
             )
             session.add(bot_msg)
             await session.commit()
@@ -303,7 +311,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
             bot_msg = Message(
                 user_id=None,
                 content=f"Meeting request detected. Missing: {missing_str}",
-                is_bot=True
+                is_bot=True,
+                group_id=group_id
             )
             session.add(bot_msg)
             await session.commit()
@@ -319,7 +328,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
             duration_minutes=meeting_info.get("duration", 60),
             zoom_link=meeting_info.get("zoom_link"),
             attendees=meeting_info.get("attendees"),
-            created_by=user_id
+            created_by=user_id,
+            group_id=group_id
         )
         session.add(meeting)
         await session.commit()
@@ -335,7 +345,8 @@ async def detect_and_suggest_meeting(session: AsyncSession, content: str, user_i
         bot_msg = Message(
             user_id=None,
             content=f"✅ Meeting created: **{meeting.title}** on {meeting.datetime.split('T')[0]} at {meeting.datetime.split('T')[1]}{attendees_str}.",
-            is_bot=True
+            is_bot=True,
+            group_id=group_id
         )
         session.add(bot_msg)
         await session.commit()
@@ -394,7 +405,7 @@ async def detect_and_set_ship_date(session: AsyncSession, content: str) -> bool:
     
     return False
 
-async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id: int = None, user_id: int = None):
+async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id: int = None, user_id: int = None, group_id: int = None):
     # Check for milestone suggestion command, accept all, or requests for more stages
     if content.strip().lower() == "accept all":
         # Get current suggested milestones from recent bot message
@@ -434,7 +445,8 @@ async def maybe_answer_with_llm(session: AsyncSession, content: str, message_id:
                     title=m_data["title"],
                     start_date=m_data["start_date"],
                     end_date=m_data["end_date"],
-                    created_by=user_id
+                    created_by=user_id,
+                    group_id=group_id
                 )
                 session.add(milestone)
             
@@ -517,7 +529,7 @@ Provide a brief, practical explanation focusing on project flow and timeline con
         reply_text += f"\n🧠 Reasoning: {reasoning}\n\nReply **\"accept all\"** to add all milestones to your project."
         
         # Send bot response to chat
-        bot_msg = Message(user_id=None, content=reply_text, is_bot=True)
+        bot_msg = Message(user_id=None, content=reply_text, is_bot=True, group_id=group_id)
         session.add(bot_msg)
         await session.commit()
         await session.refresh(bot_msg)
@@ -536,7 +548,10 @@ Provide a brief, practical explanation focusing on project flow and timeline con
     elif content.strip().lower() == "/project status":
         reply_text = await get_project_status()
     elif content.strip().lower() == "/tasks":
-        tasks_res = await session.execute(select(Task).where(Task.status == TaskStatus.pending).order_by(desc(Task.created_at)))
+        if group_id:
+            tasks_res = await session.execute(select(Task).where(Task.status == TaskStatus.pending, Task.group_id == group_id).order_by(desc(Task.created_at)))
+        else:
+            tasks_res = await session.execute(select(Task).where(Task.status == TaskStatus.pending, Task.group_id == None).order_by(desc(Task.created_at)))
         tasks = tasks_res.scalars().all()
         if tasks:
             reply_text = "📋 Pending Tasks:\n" + "\n".join([f"{i+1}. {t.content}" for i, t in enumerate(tasks)])
@@ -563,7 +578,8 @@ Provide a brief, practical explanation focusing on project flow and timeline con
                 source_file="Team Decision",
                 severity=ConflictSeverity.medium,
                 reason=vote_question,
-                expires_at=expires_at
+                expires_at=expires_at,
+                group_id=group_id
             )
             
             session.add(active_conflict)
@@ -583,7 +599,20 @@ Provide a brief, practical explanation focusing on project flow and timeline con
             if user:
                 # Normalize role using LLM
                 normalized_role = await normalize_role(user_input)
-                user.role = normalized_role
+                if group_id:
+                    # Update group-specific role
+                    membership_res = await session.execute(
+                        select(GroupMembership).where(
+                            GroupMembership.user_id == user_id,
+                            GroupMembership.group_id == group_id
+                        )
+                    )
+                    membership = membership_res.scalar_one_or_none()
+                    if membership:
+                        membership.role = normalized_role
+                else:
+                    # Update global role
+                    user.role = normalized_role
                 await session.commit()
                 if normalized_role != user_input:
                     reply_text = f"✅ Your role has been set to: **{normalized_role}**\n\n💡 Normalized from: \"{user_input}\""
@@ -620,7 +649,8 @@ Provide a brief, practical explanation focusing on project flow and timeline con
                 content=assign_param,
                 assigned_to=result['assigned_to'],
                 due_date=result.get('due_date'),
-                status=TaskStatus.pending
+                status=TaskStatus.pending,
+                group_id=group_id
             )
             session.add(task)
             await session.commit()
@@ -629,7 +659,10 @@ Provide a brief, practical explanation focusing on project flow and timeline con
             await manager.broadcast({"type": "tasks_updated"})
     elif content.strip().lower() == "/decisions":
         from db import DecisionLog
-        decisions_res = await session.execute(select(DecisionLog).order_by(desc(DecisionLog.created_at)).limit(10))
+        if group_id:
+            decisions_res = await session.execute(select(DecisionLog).where(DecisionLog.group_id == group_id).order_by(desc(DecisionLog.created_at)).limit(10))
+        else:
+            decisions_res = await session.execute(select(DecisionLog).where(DecisionLog.group_id == None).order_by(desc(DecisionLog.created_at)).limit(10))
         decisions = decisions_res.scalars().all()
         if decisions:
             reply_text = "📋 Recent Decisions:\n\n" + "\n\n".join([
@@ -685,7 +718,10 @@ Provide a brief, practical explanation focusing on project flow and timeline con
 
     elif any(kw in content.lower() for kw in ["what decisions", "decisions made", "team decisions", "what did we decide"]):
         from db import DecisionLog
-        decisions_res = await session.execute(select(DecisionLog).order_by(desc(DecisionLog.created_at)).limit(5))
+        if group_id:
+            decisions_res = await session.execute(select(DecisionLog).where(DecisionLog.group_id == group_id).order_by(desc(DecisionLog.created_at)).limit(5))
+        else:
+            decisions_res = await session.execute(select(DecisionLog).where(DecisionLog.group_id == None).order_by(desc(DecisionLog.created_at)).limit(5))
         decisions = decisions_res.scalars().all()
         if decisions:
             reply_text = "📋 **Recent Team Decisions:**\n\n" + "\n\n".join([
@@ -730,7 +766,8 @@ Provide a brief, practical explanation focusing on project flow and timeline con
                     source_file="Team Decision",
                     severity=ConflictSeverity.medium,
                     reason=vote_question,
-                    expires_at=expires_at
+                    expires_at=expires_at,
+                    group_id=group_id
                 )
                 
                 session.add(active_conflict)
@@ -797,7 +834,7 @@ Provide a brief, practical explanation focusing on project flow and timeline con
         except Exception as e:
             reply_text = f"(LLM error) {e}"
     
-    bot_msg = Message(user_id=None, content=reply_text, is_bot=True)
+    bot_msg = Message(user_id=None, content=reply_text, is_bot=True, group_id=group_id)
     session.add(bot_msg)
     await session.commit()
     await session.refresh(bot_msg)
@@ -863,7 +900,7 @@ async def generate_login_summary(username: str, session: AsyncSession) -> str:
     msgs_res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(20))
     messages = list(reversed(msgs_res.scalars().all()))
     
-    # Get user's pending tasks
+    # Get user's pending tasks (including pending assignments)
     tasks_res = await session.execute(
         select(Task).where(
             Task.status == TaskStatus.pending,
@@ -871,6 +908,10 @@ async def generate_login_summary(username: str, session: AsyncSession) -> str:
         ).order_by(Task.due_date)
     )
     user_tasks = tasks_res.scalars().all()
+    
+    # Separate pending assignments from confirmed tasks
+    pending_assignments = [t for t in user_tasks if t.pending_assignment]
+    confirmed_tasks = [t for t in user_tasks if not t.pending_assignment]
     
     # Get upcoming meetings
     from datetime import datetime
@@ -896,9 +937,14 @@ async def generate_login_summary(username: str, session: AsyncSession) -> str:
                 uname = user_res.username if user_res else "unknown"
                 context += f"{uname}: {m.content[:100]}...\n"
     
-    if user_tasks:
-        context += f"\n{username}'s pending tasks:\n"
-        for t in user_tasks:
+    if pending_assignments:
+        context += f"\n{username}'s PENDING TASK ASSIGNMENTS (need accept/decline):\n"
+        for t in pending_assignments:
+            context += f"- Task #{t.id}: {t.content} (due: {t.due_date or 'no date'}) - Reply 'accept {t.id}' or 'decline {t.id}'\n"
+    
+    if confirmed_tasks:
+        context += f"\n{username}'s confirmed tasks:\n"
+        for t in confirmed_tasks:
             context += f"- {t.content} (due: {t.due_date or 'no date'})\n"
     
     if meetings:
@@ -961,8 +1007,11 @@ async def get_users(username: str = Depends(get_current_user_token), session: As
     return {"users": [{"username": u.username, "role": u.role} for u in users]}
 
 @app.get("/api/messages")
-async def get_messages(limit: int = 50, session: AsyncSession = Depends(get_db)):
-    res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(limit))
+async def get_messages(limit: int = 50, group_id: Optional[int] = None, session: AsyncSession = Depends(get_db)):
+    if group_id:
+        res = await session.execute(select(Message).where(Message.group_id == group_id).order_by(desc(Message.created_at)).limit(limit))
+    else:
+        res = await session.execute(select(Message).where(Message.group_id == None).order_by(desc(Message.created_at)).limit(limit))
     items = list(reversed(res.scalars().all()))
     out = []
     for m in items:
@@ -992,17 +1041,26 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
         if compact_result:
             await manager.broadcast({"type": "history_compacted", "message": compact_result})
     
-    m = Message(user_id=u.id, content=payload.content, is_bot=False)
+    # Apply tone adjustment if requested
+    message_content = payload.content
+    if payload.tone and payload.tone in TONES:
+        message_content = await adjust_tone(payload.content, payload.tone)
+    
+    m = Message(user_id=u.id, content=message_content, is_bot=False, group_id=payload.group_id)
     session.add(m)
     await session.commit()
     await session.refresh(m)
     await broadcast_message(session, m)
     
+    # Set LLM tone preference if provided
+    if payload.llm_tone:
+        set_user_tone(username, payload.llm_tone)
+    
     # DIALECTIC ENGINE: Check for decision responses FIRST
     if "@bot decision" in payload.content.lower():
         decision_response = await process_vote_command(payload.content, u.id, session)
         if decision_response:
-            bot_msg = Message(user_id=None, content=decision_response, is_bot=True)
+            bot_msg = Message(user_id=None, content=decision_response, is_bot=True, group_id=payload.group_id)
             session.add(bot_msg)
             await session.commit()
             await session.refresh(bot_msg)
@@ -1013,9 +1071,9 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     
     # DIALECTIC ENGINE: Silent monitoring for conflicts (skip system commands)
     is_system_command = payload.content.strip().lower().startswith(("accept ", "decline ", "claim ", "/role", "/assign", "/tasks", "/decisions", "/milestones", "/project", "/vote"))
-    conflict_data = None if is_system_command else await monitor_message_for_conflicts(payload.content, m.id, session)
+    conflict_data = None if is_system_command else await monitor_message_for_conflicts(payload.content, m.id, session, payload.group_id)
     if conflict_data:
-        bot_msg = Message(user_id=None, content=conflict_data['intervention_message'], is_bot=True)
+        bot_msg = Message(user_id=None, content=conflict_data['intervention_message'], is_bot=True, group_id=payload.group_id)
         session.add(bot_msg)
         await session.commit()
         await session.refresh(bot_msg)
@@ -1023,6 +1081,8 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
         # Broadcast new conflict to decision bar
         await manager.broadcast({"type": "new_conflict", "conflict_id": conflict_data['conflict_id']})
         return {"ok": True, "id": m.id}
+    
+
     
     # Handle task acceptance/decline
     content_lower = payload.content.strip().lower()
@@ -1035,25 +1095,31 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             if task and task.pending_assignment:
                 # Check if current user is the assigned user
                 if task.assigned_to != u.username:
-                    bot_msg = Message(user_id=None, content=f"❌ Only **@{task.assigned_to}** can accept or decline this task.", is_bot=True)
-                    session.add(bot_msg)
-                    await session.commit()
-                    await session.refresh(bot_msg)
-                    await broadcast_message(session, bot_msg)
+                    # Send temporary error message (not saved to DB)
+                    await manager.broadcast({
+                        "type": "message",
+                        "message": {
+                            "id": -1,
+                            "username": "LLM Bot",
+                            "content": f"❌ Only **@{task.assigned_to}** can accept or decline this task.",
+                            "is_bot": True,
+                            "created_at": str(datetime.now())
+                        }
+                    })
                     return {"ok": True, "id": m.id}
                 
                 if action == "accept":
                     task.pending_assignment = False
                     task.assignment_expires_at = None
                     await session.commit()
-                    bot_msg = Message(user_id=None, content=f"✅ **@{task.assigned_to}** confirmed task: **{task.content}**", is_bot=True)
+                    bot_msg = Message(user_id=None, content=f"✅ **@{task.assigned_to}** confirmed task: **{task.content}**", is_bot=True, group_id=payload.group_id)
                 else:
                     # Decline - make it open for others
                     task.assigned_to = None
                     task.pending_assignment = False
                     task.assignment_expires_at = None
                     await session.commit()
-                    bot_msg = Message(user_id=None, content=f"🔄 **@{u.username}** declined. Task now open: **{task.content}**\n\nAnyone can claim with: `claim {task.id}`", is_bot=True)
+                    bot_msg = Message(user_id=None, content=f"🔄 **@{u.username}** declined. Task now open: **{task.content}**\n\nAnyone can claim with: `claim {task.id}`", is_bot=True, group_id=payload.group_id)
                 
                 session.add(bot_msg)
                 await session.commit()
@@ -1070,7 +1136,7 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             if task and not task.assigned_to:
                 task.assigned_to = u.username
                 await session.commit()
-                bot_msg = Message(user_id=None, content=f"✅ **@{u.username}** claimed task: **{task.content}**", is_bot=True)
+                bot_msg = Message(user_id=None, content=f"✅ **@{u.username}** claimed task: **{task.content}**", is_bot=True, group_id=payload.group_id)
                 session.add(bot_msg)
                 await session.commit()
                 await session.refresh(bot_msg)
@@ -1079,11 +1145,17 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
                 return {"ok": True, "id": m.id}
     
     # Detect natural language task assignment (without /assign command) - check BEFORE bot response
-    # Remove @bot prefix for detection
     content_for_detection = payload.content.replace("@bot", "").strip()
-    # Skip if it's a system command (accept/decline/claim)
-    is_system_cmd = content_for_detection.lower().startswith(("accept ", "decline ", "claim "))
-    if not payload.content.startswith("/") and not is_system_cmd:
+    content_lower_stripped = content_for_detection.lower()
+    
+    # Skip task detection if: system command, question, or lacks task indicators
+    is_system_cmd = content_lower_stripped.startswith(("accept ", "decline ", "claim "))
+    has_question_mark = "?" in payload.content
+    starts_with_question = content_lower_stripped.startswith(("what", "how", "why", "when", "where", "who", "which", "can", "could", "would", "should", "is", "are", "do", "does"))
+    task_indicators = ["assign", "task", "need", "should", "must", "work on", "handle", "take care", "complete", "finish"]
+    has_task_indicator = any(kw in content_lower_stripped for kw in task_indicators)
+    
+    if not payload.content.startswith("/") and not is_system_cmd and not has_question_mark and not starts_with_question and has_task_indicator:
         assignment = await detect_task_assignment(content_for_detection)
         print(f"Task assignment detection result: {assignment}")
         if assignment:
@@ -1101,7 +1173,8 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
                 due_date=result.get('due_date'),
                 status=TaskStatus.pending,
                 pending_assignment=True,
-                assignment_expires_at=expires_at
+                assignment_expires_at=expires_at,
+                group_id=payload.group_id
             )
             session.add(task)
             await session.commit()
@@ -1111,7 +1184,8 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             bot_msg = Message(
                 user_id=None,
                 content=f"🔔 Task suggested for **@{result['assigned_to']}**{due_date_text}\n\n📋 Task: {task_desc}\n\n💡 {result['reason']}\n\n**@{result['assigned_to']}**, reply:\n- `accept {task.id}` to accept\n- `decline {task.id}` to decline\n\n⏱️ Expires in 24 hours",
-                is_bot=True
+                is_bot=True,
+                group_id=payload.group_id
             )
             session.add(bot_msg)
             await session.commit()
@@ -1120,8 +1194,8 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             await manager.broadcast({"type": "tasks_updated"})
             return {"ok": True, "id": m.id}
     
-    # Detect task completion/deletion requests (skip if it's accept/decline/claim)
-    is_task_command = content_lower.startswith(("accept ", "decline ", "claim "))
+    # Detect task completion/deletion requests (skip if it's accept/decline/claim/vote)
+    is_task_command = content_lower.startswith(("accept ", "decline ", "claim ", "/vote"))
     task_action = None if is_task_command else await detect_task_action(session, payload.content)
     if task_action:
         task = await session.get(Task, task_action['task_id'])
@@ -1129,12 +1203,12 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             if task_action['action'] == 'complete':
                 task.status = TaskStatus.completed
                 await session.commit()
-                bot_msg = Message(user_id=None, content=f"✅ Task completed: **{task.content}**", is_bot=True)
+                bot_msg = Message(user_id=None, content=f"✅ Task completed: **{task.content}**", is_bot=True, group_id=payload.group_id)
             elif task_action['action'] == 'delete':
                 task_content = task.content
                 await session.delete(task)
                 await session.commit()
-                bot_msg = Message(user_id=None, content=f"🗑️ Task deleted: **{task_content}**", is_bot=True)
+                bot_msg = Message(user_id=None, content=f"🗑️ Task deleted: **{task_content}**", is_bot=True, group_id=payload.group_id)
             session.add(bot_msg)
             await session.commit()
             await session.refresh(bot_msg)
@@ -1142,12 +1216,11 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
             await manager.broadcast({"type": "tasks_updated"})
             return {"ok": True, "id": m.id}
     
-    # Check if bot should respond (commands, @bot mentions, or decision questions)
-    decision_keywords = ["what decisions", "decisions made", "team decisions", "what did we decide"]
+    # Check if bot should respond (commands or question keywords)
+    question_keywords = ["?", "what", "how", "why", "when", "where", "who", "which", "can", "could", "would", "should", "is", "are", "do", "does", "decisions", "explain", "tell me", "show me"]
     should_respond = (
-        payload.content.startswith("/") or 
-        "@bot" in payload.content.lower() or
-        any(kw in payload.content.lower() for kw in decision_keywords)
+        payload.content.startswith("/") or
+        any(kw in payload.content.lower() for kw in question_keywords)
     )
     
     # Always detect meetings, milestones, and ship date from non-command messages FIRST
@@ -1155,18 +1228,20 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     milestone_handled = False
     ship_date_handled = False
     if not payload.content.startswith("/"):
-        meeting_handled = await detect_and_suggest_meeting(session, payload.content, u.id)
+        # Only run meeting detection if message contains meeting keywords
+        meeting_keywords = ["meeting", "schedule", "meet", "call", "zoom"]
+        has_meeting_keywords = any(kw in payload.content.lower() for kw in meeting_keywords)
+        if has_meeting_keywords:
+            meeting_handled = await detect_and_suggest_meeting(session, payload.content, u.id, payload.group_id)
         milestone_response = await detect_milestone_changes(payload.content, u.id)
         if milestone_response:
             milestone_handled = True
-            bot_msg = Message(user_id=None, content=milestone_response, is_bot=True)
+            bot_msg = Message(user_id=None, content=milestone_response, is_bot=True, group_id=payload.group_id)
             session.add(bot_msg)
             await session.commit()
             await session.refresh(bot_msg)
             await broadcast_message(session, bot_msg)
-        # Only detect ship date if NOT mentioning @bot (to avoid interfering with bot requests)
-        if "@bot" not in payload.content.lower():
-            ship_date_handled = await detect_and_set_ship_date(session, payload.content)
+        ship_date_handled = await detect_and_set_ship_date(session, payload.content)
     
     if should_respond and not meeting_handled and not milestone_handled and not ship_date_handled:
         # Add user message to conversation history (skip commands)
@@ -1176,7 +1251,7 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
         # fire-and-forget LLM answer with fresh session
         async def llm_task():
             async with SessionLocal() as new_session:
-                await maybe_answer_with_llm(new_session, payload.content, m.id, u.id)
+                await maybe_answer_with_llm(new_session, payload.content, m.id, u.id, payload.group_id)
         asyncio.create_task(llm_task())
     
     return {"ok": True, "id": m.id}
@@ -1191,7 +1266,7 @@ async def clear_messages(username: str = Depends(get_current_user_token), sessio
     return {"ok": True}
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def upload_file(file: UploadFile = File(...), group_id: Optional[int] = Form(None), username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     # Validate file type
     if not file.filename.lower().endswith(('.pdf', '.docx', '.txt')):
         raise HTTPException(status_code=400, detail="Only PDF, DOCX, and TXT files are supported")
@@ -1232,7 +1307,8 @@ async def upload_file(file: UploadFile = File(...), username: str = Depends(get_
         user_id=u.id,
         content=text,
         file_data=base64.b64encode(content).decode('utf-8'),
-        summary="Generating summary..."
+        summary="Generating summary...",
+        group_id=group_id
     )
     session.add(uploaded_file)
     await session.commit()
@@ -1244,17 +1320,22 @@ async def upload_file(file: UploadFile = File(...), username: str = Depends(get_
     return {"ok": True, "filename": file.filename, "chunks": len(chunks)}
 
 @app.get("/api/files")
-async def get_files(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def get_files(group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     # Verify user is authenticated
     res = await session.execute(select(User).where(User.username == username))
     u = res.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=401, detail="Invalid user")
     
-    # Get ALL files from ALL users (group chat)
-    files_res = await session.execute(
-        select(UploadedFile).order_by(desc(UploadedFile.created_at))
-    )
+    # Filter by group_id
+    if group_id:
+        files_res = await session.execute(
+            select(UploadedFile).where(UploadedFile.group_id == group_id).order_by(desc(UploadedFile.created_at))
+        )
+    else:
+        files_res = await session.execute(
+            select(UploadedFile).where(UploadedFile.group_id == None).order_by(desc(UploadedFile.created_at))
+        )
     files = files_res.scalars().all()
     
     files_with_users = []
@@ -1356,8 +1437,11 @@ async def download_file(file_id: int, token: str, session: AsyncSession = Depend
     )
 
 @app.get("/api/tasks")
-async def get_tasks(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
-    tasks_res = await session.execute(select(Task).order_by(desc(Task.created_at)))
+async def get_tasks(group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    if group_id:
+        tasks_res = await session.execute(select(Task).where(Task.group_id == group_id).order_by(desc(Task.created_at)))
+    else:
+        tasks_res = await session.execute(select(Task).where(Task.group_id == None).order_by(desc(Task.created_at)))
     tasks = tasks_res.scalars().all()
     result = []
     for t in tasks:
@@ -1402,7 +1486,7 @@ async def complete_task(task_id: int, username: str = Depends(get_current_user_t
 
 @app.post("/api/tasks")
 async def create_task(payload: MessagePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
-    task = Task(content=payload.content, status=TaskStatus.pending)
+    task = Task(content=payload.content, status=TaskStatus.pending, group_id=payload.group_id)
     session.add(task)
     await session.commit()
     await manager.broadcast({"type": "tasks_updated"})
@@ -1499,6 +1583,7 @@ class MeetingPayload(BaseModel):
     datetime: str
     duration_minutes: int
     zoom_link: Optional[str] = None
+    group_id: Optional[int] = None
 
 @app.post("/api/meetings")
 async def create_meeting(payload: MeetingPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
@@ -1513,7 +1598,8 @@ async def create_meeting(payload: MeetingPayload, username: str = Depends(get_cu
         datetime=payload.datetime,
         duration_minutes=payload.duration_minutes,
         zoom_link=zoom_link,
-        created_by=u.id
+        created_by=u.id,
+        group_id=payload.group_id
     )
     session.add(meeting)
     await session.commit()
@@ -1562,8 +1648,11 @@ async def upload_transcript(meeting_id: int, file: UploadFile = File(...), usern
     return {"ok": True}
 
 @app.get("/api/meetings")
-async def get_meetings(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
-    meetings_res = await session.execute(select(Meeting).order_by(desc(Meeting.created_at)))
+async def get_meetings(group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    if group_id:
+        meetings_res = await session.execute(select(Meeting).where(Meeting.group_id == group_id).order_by(desc(Meeting.created_at)))
+    else:
+        meetings_res = await session.execute(select(Meeting).where(Meeting.group_id == None).order_by(desc(Meeting.created_at)))
     meetings = meetings_res.scalars().all()
     result = []
     for m in meetings:
@@ -1670,15 +1759,18 @@ class MilestonePayload(BaseModel):
     end_date: str
 
 @app.post("/api/milestones/bulk")
-async def bulk_accept_milestones(milestones: List[MilestonePayload], username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def bulk_accept_milestones(milestones: List[MilestonePayload], group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     """Accept multiple milestones at once."""
     res = await session.execute(select(User).where(User.username == username))
     u = res.scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=401, detail="Invalid user")
     
-    # Clear existing milestones
-    existing_res = await session.execute(select(Milestone))
+    # Clear existing milestones for this group
+    if group_id:
+        existing_res = await session.execute(select(Milestone).where(Milestone.group_id == group_id))
+    else:
+        existing_res = await session.execute(select(Milestone).where(Milestone.group_id == None))
     for m in existing_res.scalars().all():
         await session.delete(m)
     
@@ -1688,7 +1780,8 @@ async def bulk_accept_milestones(milestones: List[MilestonePayload], username: s
             title=m_data.title,
             start_date=m_data.start_date,
             end_date=m_data.end_date,
-            created_by=u.id
+            created_by=u.id,
+            group_id=group_id
         )
         session.add(milestone)
     
@@ -1716,9 +1809,12 @@ async def create_milestone(payload: MilestonePayload, username: str = Depends(ge
     return {"ok": True, "id": milestone.id}
 
 @app.get("/api/milestones")
-async def get_milestones(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def get_milestones(group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     """Get all milestones."""
-    milestones_res = await session.execute(select(Milestone).order_by(Milestone.start_date))
+    if group_id:
+        milestones_res = await session.execute(select(Milestone).where(Milestone.group_id == group_id).order_by(Milestone.start_date))
+    else:
+        milestones_res = await session.execute(select(Milestone).where(Milestone.group_id == None).order_by(Milestone.start_date))
     milestones = milestones_res.scalars().all()
     return {"milestones": [{"id": m.id, "title": m.title, "start_date": m.start_date, "end_date": m.end_date} for m in milestones]}
 
@@ -1761,12 +1857,15 @@ class ShipDatePayload(BaseModel):
     ship_date: str
 
 @app.post("/api/project/ship-date")
-async def set_ship_date(payload: ShipDatePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def set_ship_date(payload: ShipDatePayload, group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     """Set project ship date."""
-    settings_res = await session.execute(select(ProjectSettings).limit(1))
+    if group_id:
+        settings_res = await session.execute(select(ProjectSettings).where(ProjectSettings.group_id == group_id).limit(1))
+    else:
+        settings_res = await session.execute(select(ProjectSettings).where(ProjectSettings.group_id == None).limit(1))
     settings = settings_res.scalar_one_or_none()
     if not settings:
-        settings = ProjectSettings(ship_date=payload.ship_date)
+        settings = ProjectSettings(ship_date=payload.ship_date, group_id=group_id)
         session.add(settings)
     else:
         settings.ship_date = payload.ship_date
@@ -1774,9 +1873,12 @@ async def set_ship_date(payload: ShipDatePayload, username: str = Depends(get_cu
     return {"ok": True, "ship_date": payload.ship_date}
 
 @app.get("/api/project/ship-date")
-async def get_ship_date(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def get_ship_date(group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     """Get project ship date."""
-    settings_res = await session.execute(select(ProjectSettings).limit(1))
+    if group_id:
+        settings_res = await session.execute(select(ProjectSettings).where(ProjectSettings.group_id == group_id).limit(1))
+    else:
+        settings_res = await session.execute(select(ProjectSettings).where(ProjectSettings.group_id == None).limit(1))
     settings = settings_res.scalar_one_or_none()
     return {"ship_date": settings.ship_date if settings else None}
 
@@ -1818,10 +1920,13 @@ async def get_decision_by_conflict(conflict_id: str, username: str = Depends(get
 
 # --------- Voting System Routes ---------
 @app.get("/api/decision-log")
-async def get_decision_log(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def get_decision_log(group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     """Get project audit trail - all logged decisions."""
     from db import DecisionLog
-    decisions_res = await session.execute(select(DecisionLog).order_by(desc(DecisionLog.created_at)))
+    if group_id:
+        decisions_res = await session.execute(select(DecisionLog).where(DecisionLog.group_id == group_id).order_by(desc(DecisionLog.created_at)))
+    else:
+        decisions_res = await session.execute(select(DecisionLog).where(DecisionLog.group_id == None).order_by(desc(DecisionLog.created_at)))
     decisions = decisions_res.scalars().all()
     result = []
     for d in decisions:
@@ -1838,15 +1943,25 @@ async def get_decision_log(username: str = Depends(get_current_user_token), sess
     return {"decisions": result}
 
 @app.get("/api/active-conflicts")
-async def get_active_conflicts(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+async def get_active_conflicts(group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
     """Get currently active conflicts requiring votes."""
     from datetime import datetime
-    conflicts_res = await session.execute(
-        select(ActiveConflict).where(
-            ActiveConflict.is_resolved == False,
-            ActiveConflict.expires_at > datetime.now()
-        ).order_by(desc(ActiveConflict.created_at))
-    )
+    if group_id:
+        conflicts_res = await session.execute(
+            select(ActiveConflict).where(
+                ActiveConflict.is_resolved == False,
+                ActiveConflict.expires_at > datetime.now(),
+                ActiveConflict.group_id == group_id
+            ).order_by(desc(ActiveConflict.created_at))
+        )
+    else:
+        conflicts_res = await session.execute(
+            select(ActiveConflict).where(
+                ActiveConflict.is_resolved == False,
+                ActiveConflict.expires_at > datetime.now(),
+                ActiveConflict.group_id == None
+            ).order_by(desc(ActiveConflict.created_at))
+        )
     conflicts = conflicts_res.scalars().all()
     
     result = []
@@ -1972,11 +2087,12 @@ async def end_conflict_voting(conflict_id: str, username: str = Depends(get_curr
     
     # Log decision
     decision_log = DecisionLog(
-        decision_text=f"Team voted on conflict {conflict_id}",
+        decision_text=conflict.user_statement,
         rationale=f"Option {winner} won with {vote_counts[winner]} votes (A:{vote_counts['A']} B:{vote_counts['B']} C:{vote_counts['C']})",
         category=DecisionCategory.methodology,
         decision_type=DecisionType.consensus,
-        created_by="Team_Vote"
+        created_by="Team_Vote",
+        group_id=conflict.group_id
     )
     session.add(decision_log)
     
@@ -1997,6 +2113,93 @@ async def clear_decision_log(username: str = Depends(get_current_user_token), se
     await session.commit()
     await manager.broadcast({"type": "decisions_updated"})
     return {"ok": True}
+
+# --------- Groups Routes ---------
+class GroupPayload(BaseModel):
+    name: str
+
+@app.post("/api/groups")
+async def create_group(payload: GroupPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    group = Group(name=payload.name, created_by=u.id)
+    session.add(group)
+    await session.commit()
+    await session.refresh(group)
+    membership = GroupMembership(user_id=u.id, group_id=group.id)
+    session.add(membership)
+    await session.commit()
+    return {"ok": True, "id": group.id}
+
+@app.get("/api/groups")
+async def get_groups(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    memberships_res = await session.execute(select(GroupMembership).where(GroupMembership.user_id == u.id))
+    memberships = memberships_res.scalars().all()
+    groups = []
+    for m in memberships:
+        group = await session.get(Group, m.group_id)
+        if group:
+            groups.append({"id": group.id, "name": group.name})
+    return {"groups": groups}
+
+@app.get("/api/groups/all")
+async def get_all_groups(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    groups_res = await session.execute(select(Group))
+    groups = groups_res.scalars().all()
+    return {"groups": [{"id": g.id, "name": g.name} for g in groups]}
+
+@app.post("/api/groups/{group_id}/join")
+async def join_group(group_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    membership = GroupMembership(user_id=u.id, group_id=group_id)
+    session.add(membership)
+    await session.commit()
+    return {"ok": True}
+
+@app.get("/api/groups/{group_id}/members")
+async def get_group_members(group_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    memberships_res = await session.execute(select(GroupMembership).where(GroupMembership.group_id == group_id))
+    memberships = memberships_res.scalars().all()
+    members = []
+    for m in memberships:
+        user = await session.get(User, m.user_id)
+        if user:
+            members.append({"username": user.username, "role": m.role})
+    return {"members": members}
+
+class LastActiveGroupPayload(BaseModel):
+    group_id: Optional[int] = None
+
+@app.post("/api/user/last-active-group")
+async def set_last_active_group(payload: LastActiveGroupPayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    u.last_active_group_id = payload.group_id
+    await session.commit()
+    return {"ok": True}
+
+@app.get("/api/user/last-active-group")
+async def get_last_active_group(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    res = await session.execute(select(User).where(User.username == username))
+    u = res.scalar_one_or_none()
+    if not u:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    if u.last_active_group_id:
+        group = await session.get(Group, u.last_active_group_id)
+        if group:
+            return {"group_id": group.id, "group_name": group.name}
+    return {"group_id": None, "group_name": "OmniPal Chat"}
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
