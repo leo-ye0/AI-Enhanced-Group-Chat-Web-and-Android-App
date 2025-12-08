@@ -2537,6 +2537,7 @@ async function showDashboard() {
   $("dashboard").classList.remove("hidden");
   $("chat").classList.add("hidden");
   $("auth").classList.add("hidden");
+  $("rightSidebar").classList.add("hidden");
   document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
   document.querySelectorAll('.nav-item')[0].classList.add('active');
   await loadDashboard();
