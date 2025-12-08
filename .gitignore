@@ -21,13 +21,14 @@ wheels/
 *.egg
 
 # Virtual environments
-.env
-.venv
-env/
+.venv/
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
+*.pyc
+__pycache__/
 
 # IDE
 .vscode/
@@ -49,4 +50,26 @@ Thumbs.db
 # Node modules (if any)
 node_modules/
 
+# Environment files
+.env
+
+# Uploads and generated files
+groupchat_app_src/backend/uploads/
+groupchat_app_src/backend/chroma_db/
+
+# Model files (large)
+model/
+*.gguf
+
+# Android build files
+groupchat_app_src/twa_android_src/.gradle/
+groupchat_app_src/twa_android_src/.idea/
+groupchat_app_src/twa_android_src/local.properties
+groupchat_app_src/twa_android_src/app/build/
+groupchat_app_src/twa_android_src/build/
+*.apk
+*.ap_
+*.dex
+
+# External dependencies
 llama.cpp/

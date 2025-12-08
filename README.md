@@ -6,9 +6,11 @@ A real-time group chat application with AI assistant, file upload capabilities, 
 
 - **Real-time Group Chat**: WebSocket-based messaging with multiple users
 - **AI Assistant**: LLM bot responds to questions (messages containing "?")
+- **Dialectic Engine**: Active research partner that monitors conversations, detects conflicts with uploaded documents, and forces evidence-based decisions using Socratic method
 - **File Upload & RAG**: Upload PDF/DOCX/TXT files with automatic text extraction and vector search
 - **Auto-Summarization**: AI-generated summaries for uploaded documents
 - **Conversation Memory**: Context-aware responses using chat history
+- **Decision Logging**: Permanent audit trail for team decisions with conflict resolution tracking
 - **File Management**: Preview, download, and delete uploaded files
 - **Responsive UI**: Works on desktop and mobile devices
 
@@ -119,6 +121,8 @@ http://localhost:8000
 - `GET /api/files` - List uploaded files
 - `GET /api/files/{id}/download` - Download file
 - `DELETE /api/files/delete/{id}` - Delete file
+- `GET /api/decisions` - List all logged decisions (Dialectic Engine)
+- `GET /api/decisions/{conflict_id}` - Get specific decision
 - `WebSocket /ws` - Real-time messaging
 
 ## Architecture
@@ -158,6 +162,39 @@ groupchat_app_src/
     ├── app.js              # JavaScript logic
     └── styles.css          # Styling
 ```
+
+## Dialectic Engine
+
+The **Dialectic Engine** is an active AI research partner that:
+
+1. **Monitors Silently**: Processes every message without responding unless a conflict is detected
+2. **Detects Conflicts**: Uses RAG to find contradictions between user statements and uploaded documents
+3. **Forces Decisions**: Presents Socratic fork with 3 options (A: Keep & Mitigate, B: Align with Evidence, C: Challenge Evidence)
+4. **Logs Outcomes**: Creates permanent audit trail in database
+
+**Usage:**
+```
+User: "We should use Method A at 60°C"
+
+Bot: ✋ CONFLICT DETECTED 🚨
+Evidence from [protocol.pdf]: "Max temp is 45°C"
+
+Decision Required:
+Option A: Keep 60°C & document mitigation
+Option B: Revise to 45°C per protocol
+Option C: Challenge the protocol
+
+Reply: @bot decision A/B/C [reasoning]
+
+User: "@bot decision B We'll follow the protocol"
+
+Bot: ✅ Decision Recorded: Team elected Option B
+```
+
+**Documentation:**
+- Technical Guide: `DIALECTIC_ENGINE.md`
+- User Guide: `DIALECTIC_QUICKSTART.md`
+- Setup: `IMPLEMENTATION_SUMMARY.md`
 
 ## Troubleshooting
 

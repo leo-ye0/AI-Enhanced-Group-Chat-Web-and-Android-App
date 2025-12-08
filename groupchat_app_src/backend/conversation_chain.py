@@ -17,18 +17,29 @@ class ConversationChain:
     async def get_response(self, user_question: str) -> str:
         """Generate response using conversation history and vector search"""
         print(f"\n🤖 Processing: '{user_question}'")
-        # Multi-strategy search for better precision
-        search_results = search_documents(user_question, n_results=8)
         
-        # If initial search fails, try key terms from the question
-        if not search_results['documents'] or not search_results['documents'][0]:
-            key_terms = [word for word in user_question.lower().replace('?', '').split() if len(word) > 2]
-            for term in key_terms:
-                alt_search = search_documents(term, n_results=5)
-                if alt_search['documents'] and alt_search['documents'][0]:
-                    search_results = alt_search
-                    print(f"Alternative search with '{term}' found results")
-                    break
+        # Skip RAG for simple greetings and short messages
+        simple_patterns = ['hi', 'hello', 'hey', 'thanks', 'thank you', 'ok', 'okay', 'yes', 'no', 'bye']
+        is_simple = (len(user_question.split()) <= 2 and 
+                    any(user_question.lower().strip().startswith(p) for p in simple_patterns))
+        has_question = '?' in user_question
+        
+        # Only search documents if message is substantial or has a question
+        search_results = {'documents': [[]], 'distances': [[]]}
+        if not is_simple and (has_question or len(user_question.split()) > 3):
+            search_results = search_documents(user_question, n_results=8)
+        else:
+            print("⚡ Skipping RAG search for simple message")
+            
+            # If initial search fails, try key terms from the question
+            if not search_results['documents'] or not search_results['documents'][0]:
+                key_terms = [word for word in user_question.lower().replace('?', '').split() if len(word) > 2]
+                for term in key_terms:
+                    alt_search = search_documents(term, n_results=5)
+                    if alt_search['documents'] and alt_search['documents'][0]:
+                        search_results = alt_search
+                        print(f"Alternative search with '{term}' found results")
+                        break
         
         # Build context with relevance filtering
         context = ""
@@ -49,17 +60,22 @@ class ConversationChain:
         from datetime import datetime
         current_date = datetime.now().strftime("%Y-%m-%d")
         
+        has_docs = bool(search_results['documents'] and search_results['documents'][0])
+        
         messages = [
             {
                 "role": "system", 
                 "content": (
-                    f"You are a helpful assistant in a group chat. Today's date is {current_date}. "
-                    "When providing timelines or project phases, always use realistic dates starting from the current date. "
-                    "Prioritize information from uploaded documents and conversation history, "
-                    "but you can use your general knowledge to answer questions when documents don't contain the information. "
-                    "Always clearly indicate when you're using general knowledge vs. document information. "
-                    "CRITICAL: Never make up or hallucinate tasks, assignments, or project-specific information that isn't in the context."
-                    f"{context}"
+                    f"You are a helpful assistant in a group chat. Today's date is {current_date}.\n\n"
+                    f"{'DOCUMENT CONTEXT AVAILABLE - Prioritize this information:' if has_docs else 'NO DOCUMENTS FOUND - Use general knowledge only:'}\n"
+                    f"{context}\n"
+                    "RULES:\n"
+                    "1. For general questions (concepts, definitions, how-to): Use your knowledge freely\n"
+                    "2. For project-specific questions (tasks, decisions, team info): ONLY use conversation history or documents\n"
+                    "3. If asked about project details not in context, say 'I don't have that information' - DO NOT guess\n"
+                    "4. When using general knowledge, prefix with 'Based on general knowledge:' or similar\n"
+                    "5. When using documents, cite the source if possible\n"
+                    "6. NEVER invent: tasks, assignments, decisions, team members, deadlines, or project specifics"
                 )
             }
         ]

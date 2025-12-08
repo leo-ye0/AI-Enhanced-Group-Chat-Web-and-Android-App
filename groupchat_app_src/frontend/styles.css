@@ -73,11 +73,20 @@ button:hover{filter:brightness(1.1)}
 .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 .header-buttons{display:flex;gap:8px}
 .composer{display:flex;gap:12px;margin-top:12px;flex-shrink:0;position:relative}
-.bot-toggle-btn{background:none;border:1px solid #d1d5db;border-radius:8px;padding:8px;font-size:18px;cursor:pointer;opacity:0.4;transition:opacity 0.2s}
-.bot-toggle-btn:hover{opacity:0.7;filter:none}
-.tone-dropdown{background:none;border:1px solid #d1d5db;border-radius:8px;padding:8px;font-size:12px;cursor:pointer;opacity:0.4;transition:opacity 0.2s;color:#000}
-.tone-dropdown:hover{opacity:0.7}
-.mention-dropdown{position:absolute;bottom:100%;left:0;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:4px;margin-bottom:4px;min-width:150px;z-index:100}
+.tone-menu-container{position:relative}
+.tone-menu-btn{background:none;border:1px solid #d1d5db;border-radius:8px;padding:8px 12px;font-size:18px;cursor:pointer;opacity:0.4;transition:all 0.2s;min-width:44px}
+.tone-menu-btn:hover{opacity:0.7;filter:none}
+.tone-menu-btn.active{opacity:1;background:#f0fdf4;border-color:#10a37f}
+.tone-menu-dropdown{position:absolute;bottom:calc(100% + 8px);left:0;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);min-width:200px;max-height:400px;overflow-y:auto;z-index:1000}
+.tone-menu-dropdown.hidden{display:none}
+.tone-menu-section{padding:12px;border-bottom:1px solid #e5e7eb}
+.tone-menu-section:last-child{border-bottom:none}
+.tone-menu-header{font-size:11px;font-weight:600;color:#6b7280;margin-bottom:8px;text-transform:uppercase}
+.tone-menu-item{display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-radius:4px;font-size:13px;color:#374151;transition:background 0.2s}
+.tone-menu-item:hover{background:#f3f4f6}
+.tone-menu-item input[type="checkbox"],.tone-menu-item input[type="radio"]{margin:0;cursor:pointer}
+.tone-menu-item span{flex:1;cursor:pointer}
+.mention-dropdown{position:absolute;bottom:100%;left:0;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:4px;margin-bottom:4px;min-width:150px;z-index:1001}
 .mention-dropdown.hidden{display:none}
 .mention-item{padding:8px 12px;cursor:pointer;border-radius:4px;font-size:14px}
 .mention-item:hover{background:#f3f4f6}
@@ -142,7 +151,7 @@ p{font-size:14px;margin:0 0 12px 0}
 #sidebar,#taskPanel{height:120px;margin-top:24px}
 .main-chat{height:40vh}
 .left-nav{width:auto;max-width:70%;border-right:none!important;position:fixed;top:0;left:0;bottom:0;z-index:100}
-.chat,.dashboard{position:relative;z-index:1}
+.chat,.dashboard{position:relative;z-index:1;width:100%;height:100vh;margin:0;border-radius:0;border:none}
 .right-sidebar{width:100%;position:relative;height:100vh;overflow-y:auto}
 .toggle-left-nav-btn{display:block!important;position:fixed;top:8px;right:8px;z-index:102;width:24px;height:24px;padding:0;font-size:16px;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.2)}
 .chat-container{height:60vh}
@@ -151,5 +160,8 @@ p{font-size:14px;margin:0 0 12px 0}
 #chatInput{font-size:16px;padding:10px 12px}
 }
 .dashboard{flex:1;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.1);padding:16px;overflow-y:auto}
+@media (max-width: 480px) {
+.dashboard{padding:12px;height:100vh;overflow-y:auto}
+}
 .dashboard .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #e5e7eb}
 .dashboard h2{margin:0;font-size:24px;color:#374151}

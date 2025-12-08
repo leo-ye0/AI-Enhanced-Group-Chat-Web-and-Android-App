@@ -73,25 +73,38 @@
         <div id="messages" class="messages"></div>
         <div class="composer">
           <div class="mention-dropdown hidden" id="mentionDropdown"></div>
-          <button id="botToggle" class="bot-toggle-btn" title="Toggle bot always-on">🤖</button>
-          <select id="llmToneDropdown" class="tone-dropdown" title="Bot response tone">
-            <option value="none">🤖 Default</option>
-            <option value="professional">🤖 Pro</option>
-            <option value="casual">🤖 Casual</option>
-            <option value="concise">🤖 Brief</option>
-            <option value="detailed">🤖 Detail</option>
-            <option value="empathetic">🤖 Warm</option>
-            <option value="direct">🤖 Direct</option>
-          </select>
-          <select id="toneDropdown" class="tone-dropdown" title="Your message tone">
-            <option value="none">👤 Default</option>
-            <option value="professional">👤 Pro</option>
-            <option value="casual">👤 Casual</option>
-            <option value="concise">👤 Brief</option>
-            <option value="detailed">👤 Detail</option>
-            <option value="empathetic">👤 Warm</option>
-            <option value="direct">👤 Direct</option>
-          </select>
+          <div class="tone-menu-container">
+            <button id="toneMenuBtn" class="tone-menu-btn" title="Bot & Tone Settings">🤖</button>
+            <div class="tone-menu-dropdown hidden" id="toneMenuDropdown">
+              <div class="tone-menu-section">
+                <div class="tone-menu-header">Bot Mode</div>
+                <label class="tone-menu-item">
+                  <input type="checkbox" id="botToggleCheck">
+                  <span>Always On</span>
+                </label>
+              </div>
+              <div class="tone-menu-section">
+                <div class="tone-menu-header">Bot Tone</div>
+                <label class="tone-menu-item"><input type="radio" name="llmTone" value="none" checked><span>Default</span></label>
+                <label class="tone-menu-item"><input type="radio" name="llmTone" value="professional"><span>Professional</span></label>
+                <label class="tone-menu-item"><input type="radio" name="llmTone" value="casual"><span>Casual</span></label>
+                <label class="tone-menu-item"><input type="radio" name="llmTone" value="concise"><span>Brief</span></label>
+                <label class="tone-menu-item"><input type="radio" name="llmTone" value="detailed"><span>Detailed</span></label>
+                <label class="tone-menu-item"><input type="radio" name="llmTone" value="empathetic"><span>Warm</span></label>
+                <label class="tone-menu-item"><input type="radio" name="llmTone" value="direct"><span>Direct</span></label>
+              </div>
+              <div class="tone-menu-section">
+                <div class="tone-menu-header">Your Tone</div>
+                <label class="tone-menu-item"><input type="radio" name="userTone" value="none" checked><span>Default</span></label>
+                <label class="tone-menu-item"><input type="radio" name="userTone" value="professional"><span>Professional</span></label>
+                <label class="tone-menu-item"><input type="radio" name="userTone" value="casual"><span>Casual</span></label>
+                <label class="tone-menu-item"><input type="radio" name="userTone" value="concise"><span>Brief</span></label>
+                <label class="tone-menu-item"><input type="radio" name="userTone" value="detailed"><span>Detailed</span></label>
+                <label class="tone-menu-item"><input type="radio" name="userTone" value="empathetic"><span>Warm</span></label>
+                <label class="tone-menu-item"><input type="radio" name="userTone" value="direct"><span>Direct</span></label>
+              </div>
+            </div>
+          </div>
           <input id="chatInput" placeholder="Type a message… (use @bot or / for commands)">
           <button id="sendBtn">Send</button>
         </div>

@@ -77,8 +77,9 @@ const uploadBtn = $("uploadBtn");
 const fileInput = $("fileInput");
 const chatInput = $("chatInput");
 const sendBtn = $("sendBtn");
-const toneDropdown = $("toneDropdown");
-const llmToneDropdown = $("llmToneDropdown");
+const toneMenuBtn = $("toneMenuBtn");
+const toneMenuDropdown = $("toneMenuDropdown");
+const botToggleCheck = $("botToggleCheck");
 const fileList = $("fileList");
 const filePreview = $("filePreview");
 const previewTitle = $("previewTitle");
@@ -106,7 +107,7 @@ const meetingList = $("meetingList");
 const addMeetingBtn = $("addMeetingBtn");
 const transcriptInput = $("transcriptInput");
 const uploadTranscriptBtn = $("uploadTranscriptBtn");
-const botToggle = $("botToggle");
+
 const assignModal = $("assignModal");
 const closeAssignModal = $("closeAssignModal");
 const userCheckboxes = $("userCheckboxes");
@@ -150,19 +151,14 @@ function showAuth() {
 
 function showChat() {
   authPanel.classList.add("hidden");
-  chatPanel.classList.remove("hidden");
+  chatPanel.classList.add("hidden");
+  $("dashboard").classList.remove("hidden");
   $("leftNav").classList.remove("hidden");
-  $("rightSidebar").classList.remove("hidden");
+  $("rightSidebar").classList.add("hidden");
   $("chat").querySelector('h2').textContent = currentGroupName;
   loadCurrentUserProfile();
-  loadDecisions();
-  loadGroupBrain();
-  loadSidebarTasks();
-  loadNextMeeting();
-  loadProjectPulse();
-  loadActiveConflicts();
-  loadTeamRoles();
   loadGroups();
+  loadDashboard();
   
   setTimeout(() => {
     if ($("expandMeetings")) {
@@ -1431,16 +1427,44 @@ function insertCommand(cmd) {
   chatInput.focus();
 }
 
-botToggle.onclick = () => {
-  botAlwaysOn = !botAlwaysOn;
-  localStorage.setItem("botAlwaysOn", botAlwaysOn);
-  botToggle.style.opacity = botAlwaysOn ? "1" : "0.4";
-  chatInput.placeholder = botAlwaysOn ? "Bot is always listening..." : "Type a message… (use @bot or / for commands)";
-};
-
-if (botAlwaysOn) {
-  botToggle.style.opacity = "1";
-  chatInput.placeholder = "Bot is always listening...";
+// Tone menu dropdown functionality
+if (toneMenuBtn && toneMenuDropdown) {
+  toneMenuBtn.onclick = (e) => {
+    e.stopPropagation();
+    toneMenuDropdown.classList.toggle('hidden');
+    toneMenuBtn.classList.toggle('active');
+  };
+  
+  document.addEventListener('click', (e) => {
+    if (!toneMenuDropdown.contains(e.target) && e.target !== toneMenuBtn) {
+      toneMenuDropdown.classList.add('hidden');
+      toneMenuBtn.classList.remove('active');
+    }
+  });
+  
+  // Bot toggle checkbox
+  if (botToggleCheck) {
+    botToggleCheck.checked = botAlwaysOn;
+    botToggleCheck.onchange = () => {
+      botAlwaysOn = botToggleCheck.checked;
+      localStorage.setItem("botAlwaysOn", botAlwaysOn);
+      chatInput.placeholder = botAlwaysOn ? "Bot is always listening..." : "Type a message… (use @bot or / for commands)";
+      updateToneMenuButton();
+    };
+  }
+  
+  // Update button appearance based on settings
+  function updateToneMenuButton() {
+    if (botAlwaysOn) {
+      toneMenuBtn.style.opacity = "1";
+      chatInput.placeholder = "Bot is always listening...";
+    } else {
+      toneMenuBtn.style.opacity = "0.4";
+      chatInput.placeholder = "Type a message… (use @bot or / for commands)";
+    }
+  }
+  
+  updateToneMenuButton();
 }
 
 const sendMessage = async () => {
@@ -1451,8 +1475,10 @@ const sendMessage = async () => {
   sendBtn.disabled = true;
   try {
     const content = botAlwaysOn && !text.startsWith("/") && !text.includes("@bot") ? "@bot " + text : text;
-    const tone = toneDropdown && toneDropdown.value !== 'none' ? toneDropdown.value : null;
-    const llmTone = llmToneDropdown && llmToneDropdown.value !== 'none' ? llmToneDropdown.value : null;
+    const userToneRadio = document.querySelector('input[name="userTone"]:checked');
+    const llmToneRadio = document.querySelector('input[name="llmTone"]:checked');
+    const tone = userToneRadio && userToneRadio.value !== 'none' ? userToneRadio.value : null;
+    const llmTone = llmToneRadio && llmToneRadio.value !== 'none' ? llmToneRadio.value : null;
     const payload = {content, group_id: currentGroupId === null ? null : currentGroupId, dm_user_id: currentDmUserId};
     if (tone) payload.tone = tone;
     if (llmTone) payload.llm_tone = llmTone;
@@ -2406,6 +2432,7 @@ async function switchToGroup(groupId, groupName) {
   await callAPI('/user/last-active-group', 'POST', {group_id: groupId});
   $("dashboard").classList.add("hidden");
   $("chat").classList.remove("hidden");
+  $("rightSidebar").classList.remove("hidden");
   document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
   document.querySelectorAll('.nav-item')[1].classList.add('active');
   $("chat").querySelector('h2').textContent = groupName;
@@ -2493,7 +2520,7 @@ if (token) {
         $("chat").querySelector('h2').textContent = 'OmniPal Chat';
       }
     }
-    return Promise.all([loadMessages(), loadFiles(), loadTasks(), loadMeetings(), loadUserFilter()]);
+    return Promise.all([loadUserFilter()]);
   }).then(()=>{
     connectWS();
     showChat();
@@ -2657,6 +2684,7 @@ async function switchToDM(username) {
     
     document.getElementById('dashboard').classList.add('hidden');
     document.getElementById('chat').classList.remove('hidden');
+    $("rightSidebar").classList.remove("hidden");
     document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
     document.querySelectorAll('.nav-item')[2].classList.add('active');
     document.querySelector('#chat h2').textContent = `💬 ${username}`;
