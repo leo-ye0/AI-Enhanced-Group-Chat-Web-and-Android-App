@@ -1,37 +1,67 @@
 from llm import chat_completion
 from datetime import datetime, timedelta
 import json
+from typing import Optional, List, Dict
+from vector_db import search_documents
 
-async def suggest_milestones(chat_history: str, ship_date: str = None, milestone_count: int = 5, project_context: str = "") -> list:
+async def suggest_milestones(chat_history: str, ship_date: str = None, milestone_count: int = 5, project_context: str = "", team_roles: Optional[List[str]] = None) -> list:
     """
-    Use LLM to suggest project milestones based on chat history and ship date.
+    Enhanced milestone suggestion with RAG, team capacity, and risk assessment.
     
-    Returns: [{"title": str, "start_date": str, "end_date": str, "description": str}]
+    Returns: [{"title": str, "start_date": str, "end_date": str, "description": str, "assigned_roles": str, "risk_level": str}]
     """
     today = datetime.now().strftime('%Y-%m-%d')
     ship_date_context = f"\nIMPORTANT: Project ship date is {ship_date}. All milestones must end by this date." if ship_date else ""
     
-    prompt = f"""Analyze this project conversation and suggest {milestone_count} realistic project milestones with DESCRIPTIVE names.
+    # Extract requirements from uploaded documents using RAG
+    rag_context = ""
+    try:
+        search_results = search_documents("project requirements specifications timeline deliverables", n_results=3)
+        if search_results['documents'] and search_results['documents'][0]:
+            docs = [doc for docs in search_results['documents'] for doc in docs if doc]
+            rag_context = f"\n\nExtracted Requirements from Documents:\n{' '.join(docs[:2])[:1000]}"
+    except:
+        pass
+    
+    # Team capacity context
+    team_context = f"\n\nTeam Roles Available: {', '.join(team_roles)}" if team_roles else ""
+    
+    prompt = f"""Analyze this project and suggest {milestone_count} realistic milestones with risk assessment and resource allocation.
 
 Chat History:
 {chat_history}
 
-{f"Additional Context: {project_context}" if project_context else ""}{ship_date_context}
+{f"Additional Context: {project_context}" if project_context else ""}{ship_date_context}{rag_context}{team_context}
 
-Generate milestones in JSON format ONLY. Start dates should be realistic based on today's date ({today}).
+Generate milestones in JSON format ONLY. Consider:
+1. Working days (skip weekends)
+2. Team capacity and roles
+3. Dependencies between phases
+4. Risk factors (complexity, unknowns)
+5. Buffer time for high-risk phases
+
+Today's date: {today}
 
 Output format (JSON array only, no markdown):
 [
-  {{"title": "Descriptive Phase Name", "start_date": "YYYY-MM-DD", "end_date": "YYYY-MM-DD", "description": "Brief description"}},
-  ...
+  {{
+    "title": "Descriptive Phase Name",
+    "start_date": "YYYY-MM-DD",
+    "end_date": "YYYY-MM-DD",
+    "description": "What will be accomplished",
+    "assigned_roles": "Roles needed (e.g., Backend Dev, Designer)",
+    "risk_level": "low/medium/high",
+    "dependencies": "Previous milestone titles this depends on"
+  }}
 ]
 
 Rules:
 - Generate exactly {milestone_count} milestones
-- Dates must be in YYYY-MM-DD format
-- Start dates should be sequential
-- Each phase should be 1-4 weeks long
-- Titles MUST be descriptive and specific to the project (e.g., "Requirements Gathering", "Backend Development", "User Testing"), NOT generic like "Milestone 1" or "Phase 1"
+- Dates in YYYY-MM-DD format, skip weekends
+- Sequential start dates with realistic durations (1-4 weeks)
+- Descriptive titles specific to project (NOT "Milestone 1")
+- Assign roles based on team composition
+- Mark high-risk phases (new tech, complex features)
 {f"- Final milestone must end on or before {ship_date}" if ship_date else ""}
 """
     
@@ -44,6 +74,11 @@ Rules:
         if json_start != -1 and json_end > json_start:
             json_str = response[json_start:json_end]
             milestones = json.loads(json_str)
+            # Ensure all milestones have required fields
+            for m in milestones:
+                m.setdefault('assigned_roles', 'Team')
+                m.setdefault('risk_level', 'medium')
+                m.setdefault('dependencies', 'None')
             return milestones
         else:
             # Fallback: generate default milestones
@@ -63,21 +98,30 @@ def generate_default_milestones(ship_date: str = None):
     
     return [
         {
-            "title": "Planning",
+            "title": "Planning & Requirements",
             "start_date": today.strftime('%Y-%m-%d'),
             "end_date": (today + timedelta(days=phase_days)).strftime('%Y-%m-%d'),
-            "description": "Project planning and setup"
+            "description": "Project planning and requirements gathering",
+            "assigned_roles": "PM, Team Lead",
+            "risk_level": "low",
+            "dependencies": "None"
         },
         {
             "title": "Development",
             "start_date": (today + timedelta(days=phase_days)).strftime('%Y-%m-%d'),
             "end_date": (today + timedelta(days=phase_days*2)).strftime('%Y-%m-%d'),
-            "description": "Core development phase"
+            "description": "Core development and implementation",
+            "assigned_roles": "Developers, Designers",
+            "risk_level": "medium",
+            "dependencies": "Planning & Requirements"
         },
         {
-            "title": "Testing",
+            "title": "Testing & Launch",
             "start_date": (today + timedelta(days=phase_days*2)).strftime('%Y-%m-%d'),
             "end_date": (datetime.strptime(ship_date, '%Y-%m-%d') if ship_date else today + timedelta(days=phase_days*3)).strftime('%Y-%m-%d'),
-            "description": "Testing and quality assurance"
+            "description": "Testing, bug fixes, and deployment",
+            "assigned_roles": "QA, DevOps, Team",
+            "risk_level": "high",
+            "dependencies": "Development"
         }
     ]

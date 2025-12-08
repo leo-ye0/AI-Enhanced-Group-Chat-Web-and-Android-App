@@ -17,7 +17,7 @@ class ConflictDetector:
     """Detects conflicts between user statements and uploaded document evidence."""
     
     @staticmethod
-    async def check_for_conflicts(user_statement: str) -> Optional[Dict]:
+    async def check_for_conflicts(user_statement: str, session=None) -> Optional[Dict]:
         """Check if user statement conflicts with uploaded documents."""
         print(f"\n🔍 DIALECTIC ENGINE: Monitoring '{user_statement[:60]}...'")
         
@@ -34,6 +34,14 @@ class ConflictDetector:
             if not is_rhetorical:
                 print("  ⏭️  Skipped: Question (not a declarative statement)")
                 return None
+        
+        # Search past decisions first
+        past_decision = None
+        if session:
+            past_decision = await ConflictDetector._check_past_decisions(user_statement, session)
+            if past_decision:
+                print(f"  📋 Found past decision: {past_decision['decision_summary']}")
+                return past_decision
         
         # Search for relevant documents with better query
         search_query = f"requirements specification {user_statement}"
@@ -64,7 +72,7 @@ class ConflictDetector:
             best_doc = search_results['documents'][0][0]
             best_metadata = search_results['metadatas'][0][0]
         
-        # Use LLM to intelligently detect conflicts
+        # Use LLM to intelligently detect conflicts with enhanced context
         conflict_check_prompt = f"""You are a JSON-only conflict detector. Respond ONLY with valid JSON, no code, no explanations.
 
 User statement: "{user_statement}"
@@ -79,8 +87,11 @@ Examples:
 - "budget $50k" vs "budget $30k" = conflict
 - "use React hooks" vs "use React" = no conflict
 
+Classify conflict type: technical, timeline, budget, methodology, or scope.
+Assess confidence: 0-100 (how certain this is a real conflict).
+
 Respond with ONLY this JSON (no markdown, no code blocks):
-{{"conflict": true, "severity": "high", "reason": "Streamlit vs React"}}
+{{"conflict": true, "severity": "high", "reason": "Streamlit vs React", "category": "technical", "confidence": 95}}
 
 Your JSON:"""
         
@@ -102,8 +113,16 @@ Your JSON:"""
             
             print(f"  🤖 LLM: {conflict_data}")
             if conflict_data.get("conflict"):
+                confidence = conflict_data.get("confidence", 50)
+                # Skip low-confidence conflicts (< 70%)
+                if confidence < 70:
+                    print(f"  ⚠️  Low confidence ({confidence}%), skipping")
+                    return None
+                
                 print(f"  🚨 CONFLICT DETECTED!")
                 print(f"     Severity: {conflict_data.get('severity', 'medium').upper()}")
+                print(f"     Category: {conflict_data.get('category', 'general').upper()}")
+                print(f"     Confidence: {confidence}%")
                 print(f"     Source: {best_metadata.get('filename', 'Unknown')}")
                 print(f"     Reason: {conflict_data.get('reason', 'Conflict detected')}")
                 return {
@@ -112,6 +131,8 @@ Your JSON:"""
                     "source_file": best_metadata.get('filename', 'Unknown'),
                     "severity": conflict_data.get("severity", "medium"),
                     "reason": conflict_data.get("reason", "Conflict detected"),
+                    "category": conflict_data.get("category", "general"),
+                    "confidence": confidence,
                     "metadata": best_metadata
                 }
             else:
@@ -205,6 +226,64 @@ Return ONLY a comma-separated list of lowercase keywords, no explanations:"""
         
         # Fallback keywords if extraction fails
         return ['should', 'must', 'requirement', 'specification', 'technology', 'framework']
+    
+    @staticmethod
+    async def _check_past_decisions(user_statement: str, session) -> Optional[Dict]:
+        """Check if user statement relates to a previously resolved conflict."""
+        from db import Decision, User
+        from sqlalchemy import select, desc
+        
+        # Get recent decisions (last 50)
+        result = await session.execute(
+            select(Decision, User.username)
+            .join(User, Decision.decided_by == User.id)
+            .order_by(desc(Decision.created_at))
+            .limit(50)
+        )
+        decisions = result.all()
+        
+        if not decisions:
+            return None
+        
+        # Build decision context for LLM
+        decision_context = "\n".join([
+            f"- {d.Decision.created_at.strftime('%Y-%m-%d')}: Option {d.Decision.selected_option.value} - {d.Decision.reasoning[:100]}"
+            for d in decisions[:10]
+        ])
+        
+        # Check if statement conflicts with past decision
+        check_prompt = f"""Does this user statement contradict or revisit a previously resolved decision?
+
+User statement: "{user_statement}"
+
+Past decisions:
+{decision_context}
+
+If the statement proposes something already decided, respond with JSON:
+{{"revisits_decision": true, "decision_date": "YYYY-MM-DD", "original_choice": "A/B/C", "summary": "brief summary"}}
+
+If no conflict with past decisions, respond:
+{{"revisits_decision": false}}
+
+Your JSON:"""
+        
+        try:
+            response = await chat_completion([{"role": "user", "content": check_prompt}], temperature=0.0)
+            import json, re
+            json_match = re.search(r'\{[^}]+\}', response)
+            if json_match:
+                result = json.loads(json_match.group(0))
+                if result.get("revisits_decision"):
+                    return {
+                        "is_past_decision_reference": True,
+                        "decision_date": result.get("decision_date"),
+                        "original_choice": result.get("original_choice"),
+                        "decision_summary": result.get("summary", "Previous decision found")
+                    }
+        except Exception as e:
+            print(f"  ⚠️  Past decision check failed: {e}")
+        
+        return None
 
 class SocraticInterventionGenerator:
     """Generates Socratic intervention messages with decision forks."""
@@ -212,6 +291,17 @@ class SocraticInterventionGenerator:
     @staticmethod
     async def generate_intervention(conflict: Dict, conflict_id: str) -> str:
         """Generate intervention message with decision options."""
+        
+        # Check if this is a past decision reference
+        if conflict.get('is_past_decision_reference'):
+            return f"""📋 **PAST DECISION REFERENCE**
+
+ℹ️ This topic was previously resolved on **{conflict['decision_date']}**.
+
+**Original Decision:** Team chose **Option {conflict['original_choice']}**
+**Summary:** {conflict['decision_summary']}
+
+💡 If you want to revisit this decision, please provide new evidence or changed circumstances."""
         
         evidence = conflict['conflicting_evidence'][:200]  # Truncate for display
         source = conflict['source_file']
@@ -225,9 +315,13 @@ class SocraticInterventionGenerator:
             "high": "🔴 HIGH SEVERITY: Team consensus required."
         }
         
+        category = conflict.get('category', 'general').upper()
+        confidence = conflict.get('confidence', 50)
+        
         intervention = f"""✋ **CONFLICT DETECTED** {emoji}
 
-{severity_text.get(conflict['severity'], '')} Voting period: 24 hours.
+{severity_text.get(conflict['severity'], '')} Voting period: 2 hours.
+**Category:** {category} | **Confidence:** {confidence}%
 
 **Evidence from [{source}]:**
 > "{evidence}..."
@@ -325,17 +419,27 @@ async def monitor_message_for_conflicts(message_content: str, message_id: int, s
     # Clean @bot mentions for conflict detection
     clean_content = message_content.replace("@bot", "").strip()
     
-    # Check for conflicts
-    conflict = await ConflictDetector.check_for_conflicts(clean_content)
+    # Check for conflicts (pass session for decision history lookup)
+    conflict = await ConflictDetector.check_for_conflicts(clean_content, session)
     
     if conflict:
+        # If this is a past decision reference, don't create new conflict
+        if conflict.get('is_past_decision_reference'):
+            intervention = await SocraticInterventionGenerator.generate_intervention(conflict, None)
+            return {
+                "conflict_id": None,
+                "intervention_message": intervention,
+                "severity": "info",
+                "is_reference": True
+            }
+        
         # Store conflict in database for voting
         from datetime import datetime, timedelta
         from db import ActiveConflict, ConflictSeverity
         import uuid
         
         conflict_id = f"C{str(uuid.uuid4())[:8].upper()}"
-        expires_at = datetime.now() + timedelta(hours=24)
+        expires_at = datetime.now() + timedelta(hours=2)
         
         active_conflict = ActiveConflict(
             conflict_id=conflict_id,

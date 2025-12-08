@@ -20,11 +20,24 @@ def calculate_project_pulse(current_date: str, milestones: List[Dict], tasks: Li
         start = datetime.strptime(m["start_date"], "%Y-%m-%d").date()
         end = datetime.strptime(m["end_date"], "%Y-%m-%d").date()
         
-        # Calculate progress
+        # Calculate progress based on tasks OR time elapsed
         phase_tasks = [t for t in tasks if t.get("milestone") == m["title"]]
         total = len(phase_tasks)
         completed = len([t for t in phase_tasks if t.get("status") == "completed"])
-        progress = round((completed / total * 100) if total > 0 else 0)
+        
+        if total > 0:
+            # Task-based progress (preferred)
+            progress = round((completed / total * 100))
+        else:
+            # Time-based progress (fallback when no tasks)
+            total_days = (end - start).days
+            elapsed_days = (curr - start).days
+            if curr < start:
+                progress = 0
+            elif curr > end:
+                progress = 100
+            else:
+                progress = round((elapsed_days / total_days * 100)) if total_days > 0 else 0
         
         # Calculate deadline delta
         days_remaining = (end - curr).days

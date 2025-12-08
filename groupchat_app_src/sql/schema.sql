@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INT AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(50) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
+  role VARCHAR(100) NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -26,7 +27,9 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS project_settings (
   id INT AUTO_INCREMENT PRIMARY KEY,
   ship_date DATE NULL,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  group_id INT NULL,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_project_settings_group FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Project Milestones Table
@@ -35,9 +38,15 @@ CREATE TABLE IF NOT EXISTS milestones (
   title VARCHAR(255) NOT NULL,
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
+  description TEXT NULL,
+  assigned_roles VARCHAR(255) NULL,
+  risk_level VARCHAR(50) NULL,
+  dependencies TEXT NULL,
   created_by INT NOT NULL,
+  group_id INT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_milestone_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+  CONSTRAINT fk_milestone_user FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
+  CONSTRAINT fk_milestone_group FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Decision Log for Project Audit Trail
@@ -49,8 +58,10 @@ CREATE TABLE IF NOT EXISTS decision_log (
   decision_type ENUM('locked', 'resolved', 'consensus') NOT NULL,
   created_by VARCHAR(100) NOT NULL,
   chat_reference_id INT NULL,
+  group_id INT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_decision_log_message FOREIGN KEY (chat_reference_id) REFERENCES messages(id) ON DELETE SET NULL
+  CONSTRAINT fk_decision_log_message FOREIGN KEY (chat_reference_id) REFERENCES messages(id) ON DELETE SET NULL,
+  CONSTRAINT fk_decision_log_group FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Dialectic Engine: Decision Log Table
@@ -77,9 +88,11 @@ CREATE TABLE IF NOT EXISTS active_conflicts (
   reason TEXT NOT NULL,
   expires_at TIMESTAMP NOT NULL,
   is_resolved BOOLEAN DEFAULT FALSE,
+  group_id INT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_conflict_id (conflict_id),
-  INDEX idx_expires_at (expires_at)
+  INDEX idx_expires_at (expires_at),
+  CONSTRAINT fk_active_conflicts_group FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Voting System: Votes Table

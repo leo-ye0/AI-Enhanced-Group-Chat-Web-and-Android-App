@@ -20,6 +20,7 @@
         </div>
       </div>
     </div>
+    <div class="nav-item" onclick="showDashboard()">📊 Dashboard</div>
     <div class="nav-item active" onclick="toggleGroups()">💬 Groups</div>
     <div id="groupsList" class="hidden" style="padding:8px 20px;background:#f9fafb;border-bottom:1px solid #e5e7eb">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -28,11 +29,22 @@
       </div>
       <div id="groupsContainer"></div>
     </div>
-    <div class="nav-item">📨 Direct Msgs</div>
+    <div class="nav-item" onclick="toggleDMs()">📨 Direct Msgs</div>
+    <div id="dmList" class="hidden" style="padding:8px 20px;background:#f9fafb;border-bottom:1px solid #e5e7eb">
+      <div style="font-size:11px;font-weight:600;color:#6b7280;margin-bottom:8px">DIRECT MESSAGES</div>
+      <div id="dmUsersContainer"></div>
+    </div>
   </nav>
   <div class="resize-handle" id="leftResize"></div>
 
   <div class="container">
+    <div class="dashboard hidden" id="dashboard">
+      <div class="header">
+        <h2>📊 Dashboard</h2>
+        <button onclick="hideDashboard()" class="toggle-btn">Back to Chat</button>
+      </div>
+      <div id="dashboardContent" style="padding:20px;overflow-y:auto;height:calc(100vh - 80px)"></div>
+    </div>
     <div class="auth" id="auth">
       <h1>OmniPal Chat</h1>
       <p>Create an account or log in to join the chat.</p>
