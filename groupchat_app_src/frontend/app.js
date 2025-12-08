@@ -279,7 +279,9 @@ async function callAPI(path, method = "GET", body) {
 
 async function addMessage(m) {
   const el = document.createElement("div");
-  el.className = "message" + (m.is_bot ? " bot" : "");
+  const currentUser = localStorage.getItem("username");
+  const isCurrentUser = !m.is_bot && m.username === currentUser;
+  el.className = "message" + (m.is_bot ? " bot" : "") + (isCurrentUser ? " current-user" : "");
   const meta = document.createElement("div");
   meta.className = "meta";
   
@@ -322,8 +324,13 @@ async function addMessage(m) {
 }
 
 async function loadMessages() {
-  const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
-  console.log('loadMessages: currentGroupId=', currentGroupId, 'params=', params);
+  let params = '';
+  if (currentDmUserId) {
+    params = `?dm_user_id=${currentDmUserId}`;
+  } else if (currentGroupId) {
+    params = `?group_id=${currentGroupId}`;
+  }
+  console.log('loadMessages: currentGroupId=', currentGroupId, 'currentDmUserId=', currentDmUserId, 'params=', params);
   const data = await callAPI(`/messages${params}`);
   console.log('loadMessages: received', data.messages.length, 'messages');
   messagesDiv.innerHTML = "";
@@ -562,6 +569,11 @@ async function editTaskInline(task, taskElement) {
   const usersData = await callAPI('/users');
   const users = usersData.users;
   
+  // Get milestones for dropdown
+  const params = currentGroupId ? `?group_id=${currentGroupId}` : '';
+  const milestonesData = await callAPI(`/milestones${params}`);
+  const milestones = milestonesData.milestones;
+  
   // Create inline edit form
   const editForm = document.createElement('div');
   editForm.className = 'inline-task-edit';
@@ -572,6 +584,10 @@ async function editTaskInline(task, taskElement) {
     <select id="editTaskAssignee" style="width:100%;padding:4px;border:1px solid #ddd;border-radius:3px;font-size:11px;margin-bottom:4px">
       <option value="">Unassigned</option>
       ${users.map(u => `<option value="${u.username}" ${task.assigned_to === u.username ? 'selected' : ''}>${u.username}${u.role ? ' (' + u.role + ')' : ''}</option>`).join('')}
+    </select>
+    <select id="editTaskMilestone" style="width:100%;padding:4px;border:1px solid #ddd;border-radius:3px;font-size:11px;margin-bottom:4px">
+      <option value="">No Milestone</option>
+      ${milestones.map(m => `<option value="${m.id}" ${task.milestone_id === m.id ? 'selected' : ''}>${m.title}</option>`).join('')}
     </select>
     <div style="display:flex;gap:4px">
       <button class="toggle-btn" style="flex:1;font-size:10px" onclick="saveTaskEdit(${task.id})">Save</button>
@@ -587,6 +603,7 @@ async function saveTaskEdit(taskId) {
   const content = document.getElementById('editTaskContent').value.trim();
   const dueDate = document.getElementById('editTaskDueDate').value;
   const assignee = document.getElementById('editTaskAssignee').value;
+  const milestoneId = document.getElementById('editTaskMilestone').value;
   
   if (!content) return;
   
@@ -594,6 +611,7 @@ async function saveTaskEdit(taskId) {
     const payload = {content};
     if (dueDate) payload.due_date = dueDate;
     if (assignee) payload.assigned_to = assignee;
+    if (milestoneId) payload.milestone_id = parseInt(milestoneId);
     await callAPI(`/tasks/${taskId}`, 'PATCH', payload);
     cancelTaskEdit();
     await loadSidebarTasks();
@@ -699,6 +717,10 @@ async function loadSidebarTasks() {
     const tasksData = await callAPI(`/tasks${params}`);
     const tasks = tasksData.tasks.filter(t => t.status === 'pending').slice(0, 5);
     
+    // Get milestones for display
+    const milestonesData = await callAPI(`/milestones${params}`);
+    const milestones = milestonesData.milestones;
+    
     let users = [];
     if (currentGroupId) {
       const groupData = await callAPI(`/groups/${currentGroupId}/members`);
@@ -732,6 +754,8 @@ async function loadSidebarTasks() {
           return `@${username}${role}`;
         }).join(', ');
         const due = t.due_date ? `<div style="font-size:10px;opacity:0.7;margin-top:2px">📅 ${t.due_date}</div>` : '';
+        const milestone = t.milestone_id ? milestones.find(m => m.id === t.milestone_id) : null;
+        const milestoneTag = milestone ? `<div style="font-size:9px;margin-top:2px;padding:2px 4px;background:#e0e7ff;color:#4338ca;border-radius:3px;display:inline-block">📍 ${milestone.title}</div>` : '';
         const isPending = t.pending_assignment === true;
         const isConfirmed = t.assigned_to && !isPending && t.status === 'pending';
         const isCompleted = t.status === 'completed';
@@ -745,6 +769,7 @@ async function loadSidebarTasks() {
             <span style="flex-shrink:0">${icon}</span>
             <div style="flex:1">
               <div style="font-size:11px">${t.content.substring(0, 40)}${t.content.length > 40 ? '...' : ''}</div>
+              ${milestoneTag}
               ${assigneeInfo ? `<div style="font-size:10px;opacity:0.8;margin-top:2px">${assigneeInfo}${isPending ? ' (pending)' : ''}</div>` : ''}
               ${due}
             </div>
@@ -935,6 +960,8 @@ async function loadProjectPulse() {
       
       const milestoneIndex = pulseExpanded ? i : i;
       const milestone = milestones[milestoneIndex];
+      const riskColor = milestone.risk_level === 'high' ? '#fecaca' : milestone.risk_level === 'medium' ? '#fed7aa' : '#d1fae5';
+      const riskIcon = milestone.risk_level === 'high' ? '🔴' : milestone.risk_level === 'medium' ? '🟡' : '🟢';
       const card = document.createElement("div");
       card.className = "pulse-content";
       card.innerHTML = `
@@ -948,6 +975,8 @@ async function loadProjectPulse() {
         <div class="progress-bar"><div class="progress" style="width:${phase.progress}%"></div></div>
         <div style="font-size:11px;margin-top:4px">${phase.progress}% Complete</div>
         ${phase.status === "ACTIVE" ? `<div class="pulse-deadline" style="background:${urgencyBg};color:#374151">${urgencyIcon} ${phase.days_remaining} Days Left</div>` : ''}
+        ${milestone.assigned_roles ? `<div style="font-size:10px;margin-top:4px;opacity:0.8">👥 ${milestone.assigned_roles}</div>` : ''}
+        ${milestone.risk_level ? `<div style="font-size:10px;margin-top:2px;padding:2px 6px;background:${riskColor};border-radius:3px;display:inline-block">${riskIcon} ${milestone.risk_level.toUpperCase()} RISK</div>` : ''}
       `;
       container.appendChild(card);
     });
@@ -1424,7 +1453,7 @@ const sendMessage = async () => {
     const content = botAlwaysOn && !text.startsWith("/") && !text.includes("@bot") ? "@bot " + text : text;
     const tone = toneDropdown && toneDropdown.value !== 'none' ? toneDropdown.value : null;
     const llmTone = llmToneDropdown && llmToneDropdown.value !== 'none' ? llmToneDropdown.value : null;
-    const payload = {content, group_id: currentGroupId === null ? null : currentGroupId};
+    const payload = {content, group_id: currentGroupId === null ? null : currentGroupId, dm_user_id: currentDmUserId};
     if (tone) payload.tone = tone;
     if (llmTone) payload.llm_tone = llmTone;
     console.log('Sending message with payload:', payload);
@@ -1437,14 +1466,17 @@ const sendMessage = async () => {
 sendBtn.onclick = sendMessage;
 
 clearBtn.onclick = async () => {
-  console.log("Clear button clicked");
-  if (confirm("Clear all chat history?")) {
+  const contextName = currentDmUserId ? currentDmUsername : (currentGroupName || 'this chat');
+  if (confirm(`Clear all messages in ${contextName}?`)) {
     try {
-      console.log("Calling clear API...");
-      await callAPI("/messages", "DELETE");
-      console.log("Clear API successful");
+      let params = '';
+      if (currentDmUserId) {
+        params = `?dm_user_id=${currentDmUserId}`;
+      } else if (currentGroupId) {
+        params = `?group_id=${currentGroupId}`;
+      }
+      await callAPI(`/messages${params}`, "DELETE");
     } catch (e) {
-      console.error("Clear failed:", e);
       alert("Failed to clear chat: " + e.message);
     }
   }
@@ -2310,6 +2342,8 @@ async function clearDecisions() {
 
 let currentGroupId = localStorage.getItem('currentGroupId') && localStorage.getItem('currentGroupId') !== 'null' ? parseInt(localStorage.getItem('currentGroupId')) : null;
 let currentGroupName = localStorage.getItem('currentGroupName') || 'OmniPal Chat';
+let currentDmUserId = null;
+let currentDmUsername = null;
 
 async function loadGroups() {
   try {
@@ -2360,6 +2394,8 @@ function createNewGroup() {
 async function switchToGroup(groupId, groupName) {
   currentGroupId = groupId;
   currentGroupName = groupName;
+  currentDmUserId = null;
+  currentDmUsername = null;
   if (groupId === null) {
     localStorage.removeItem('currentGroupId');
     localStorage.removeItem('currentGroupName');
@@ -2368,6 +2404,10 @@ async function switchToGroup(groupId, groupName) {
     localStorage.setItem('currentGroupName', groupName);
   }
   await callAPI('/user/last-active-group', 'POST', {group_id: groupId});
+  $("dashboard").classList.add("hidden");
+  $("chat").classList.remove("hidden");
+  document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+  document.querySelectorAll('.nav-item')[1].classList.add('active');
   $("chat").querySelector('h2').textContent = groupName;
   loadMessages();
   loadFiles();
@@ -2463,4 +2503,166 @@ if (token) {
   });
 } else {
   showAuth();
+}
+
+// Dashboard functionality
+async function showDashboard() {
+  $("dashboard").classList.remove("hidden");
+  $("chat").classList.add("hidden");
+  $("auth").classList.add("hidden");
+  document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+  document.querySelectorAll('.nav-item')[0].classList.add('active');
+  await loadDashboard();
+}
+
+function hideDashboard() {
+  $("dashboard").classList.add("hidden");
+  $("chat").classList.remove("hidden");
+}
+
+async function loadDashboard() {
+  try {
+    const data = await callAPI('/dashboard');
+    const container = $("dashboardContent");
+    container.innerHTML = '<h3 style="margin-bottom:20px">📊 Your Workspace Overview</h3>';
+    
+    data.groups.forEach(group => {
+      const card = document.createElement('div');
+      card.style.cssText = 'background:#fff;border-radius:8px;padding:20px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,0.1)';
+      
+      const stats = group.stats;
+      const hasActivity = stats.my_tasks > 0 || stats.active_conflicts > 0 || stats.upcoming_meetings > 0;
+      
+      card.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+          <h4 style="margin:0;font-size:18px">${group.group_name}</h4>
+          <button onclick="switchToGroup(${group.group_id}, '${group.group_name}')" style="padding:6px 12px;background:#10a37f;color:white;border:none;border-radius:4px;cursor:pointer;font-size:12px">Open</button>
+        </div>
+        
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:16px">
+          <div style="background:#f0f9ff;padding:12px;border-radius:6px;text-align:center">
+            <div style="font-size:24px;font-weight:600;color:#3b82f6">${stats.my_tasks}</div>
+            <div style="font-size:11px;color:#6b7280;margin-top:4px">My Tasks</div>
+          </div>
+          <div style="background:#fef3c7;padding:12px;border-radius:6px;text-align:center">
+            <div style="font-size:24px;font-weight:600;color:#d97706">${stats.overdue_tasks}</div>
+            <div style="font-size:11px;color:#6b7280;margin-top:4px">Overdue</div>
+          </div>
+          <div style="background:#fecaca;padding:12px;border-radius:6px;text-align:center">
+            <div style="font-size:24px;font-weight:600;color:#dc2626">${stats.due_soon_tasks}</div>
+            <div style="font-size:11px;color:#6b7280;margin-top:4px">Due Soon</div>
+          </div>
+          <div style="background:#f0fdf4;padding:12px;border-radius:6px;text-align:center">
+            <div style="font-size:24px;font-weight:600;color:#10b981">${stats.upcoming_meetings}</div>
+            <div style="font-size:11px;color:#6b7280;margin-top:4px">Meetings</div>
+          </div>
+        </div>
+        
+        ${group.my_tasks.length > 0 ? `
+          <div style="margin-bottom:16px">
+            <h5 style="font-size:13px;margin:0 0 8px 0;color:#6b7280">📋 MY TASKS</h5>
+            ${group.my_tasks.map(t => `
+              <div style="background:${t.is_overdue ? '#fecaca' : '#f9fafb'};padding:8px;border-radius:4px;margin-bottom:4px;font-size:12px">
+                <div style="font-weight:500">${t.content}</div>
+                ${t.due_date ? `<div style="font-size:10px;color:#6b7280;margin-top:2px">📅 ${t.due_date}${t.is_overdue ? ' (OVERDUE)' : ''}</div>` : ''}
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+        
+        ${group.conflicts.length > 0 ? `
+          <div style="margin-bottom:16px">
+            <h5 style="font-size:13px;margin:0 0 8px 0;color:#6b7280">🗳️ ACTIVE VOTES</h5>
+            ${group.conflicts.map(c => `
+              <div style="background:#fef3c7;padding:8px;border-radius:4px;margin-bottom:4px;font-size:12px;border-left:3px solid #d97706">
+                <div style="font-weight:500">${c.reason}</div>
+                <div style="font-size:10px;color:#6b7280;margin-top:2px">${c.conflict_id} • ${c.severity.toUpperCase()}</div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+        
+        ${group.meetings.length > 0 ? `
+          <div style="margin-bottom:16px">
+            <h5 style="font-size:13px;margin:0 0 8px 0;color:#6b7280">📅 UPCOMING MEETINGS</h5>
+            ${group.meetings.map(m => `
+              <div style="background:#f0fdf4;padding:8px;border-radius:4px;margin-bottom:4px;font-size:12px">
+                <div style="font-weight:500">${m.title}</div>
+                <div style="font-size:10px;color:#6b7280;margin-top:2px">📅 ${m.datetime.replace('T', ' ')}</div>
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+        
+        ${group.recent_activity.length > 0 ? `
+          <div>
+            <h5 style="font-size:13px;margin:0 0 8px 0;color:#6b7280">💬 RECENT ACTIVITY</h5>
+            ${group.recent_activity.map(a => `
+              <div style="background:#f9fafb;padding:6px;border-radius:4px;margin-bottom:4px;font-size:11px;color:#6b7280">
+                ${a.content}
+              </div>
+            `).join('')}
+          </div>
+        ` : ''}
+      `;
+      
+      container.appendChild(card);
+    });
+  } catch (e) {
+    console.error('Failed to load dashboard:', e);
+    $("dashboardContent").innerHTML = '<div style="padding:20px;text-align:center;color:#ef4444">Failed to load dashboard</div>';
+  }
+}
+
+// DM functionality
+function toggleDMs() {
+  const dmList = document.getElementById('dmList');
+  if (dmList) {
+    if (dmList.classList.contains('hidden')) {
+      dmList.classList.remove('hidden');
+      loadDMUsers();
+    } else {
+      dmList.classList.add('hidden');
+    }
+  }
+}
+
+async function loadDMUsers() {
+  try {
+    const data = await callAPI('/users');
+    const container = document.getElementById('dmUsersContainer');
+    const currentUser = localStorage.getItem('username');
+    container.innerHTML = '';
+    data.users.filter(u => u.username !== currentUser).forEach(u => {
+      const el = document.createElement('div');
+      el.style.cssText = `padding:8px;margin:4px 0;background:#ffffff;color:#000;border-radius:4px;cursor:pointer;font-size:12px`;
+      el.textContent = u.username;
+      el.onclick = () => switchToDM(u.username);
+      container.appendChild(el);
+    });
+  } catch (e) {
+    console.error('Failed to load DM users:', e);
+  }
+}
+
+async function switchToDM(username) {
+  try {
+    const usersData = await callAPI('/users');
+    const user = usersData.users.find(u => u.username === username);
+    if (!user) return;
+    
+    currentDmUserId = user.id;
+    currentDmUsername = username;
+    currentGroupId = null;
+    
+    document.getElementById('dashboard').classList.add('hidden');
+    document.getElementById('chat').classList.remove('hidden');
+    document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+    document.querySelectorAll('.nav-item')[2].classList.add('active');
+    document.querySelector('#chat h2').textContent = `💬 ${username}`;
+    
+    await loadMessages();
+  } catch (e) {
+    console.error('Failed to switch to DM:', e);
+  }
 }

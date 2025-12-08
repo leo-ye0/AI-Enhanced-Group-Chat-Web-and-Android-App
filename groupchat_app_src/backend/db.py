@@ -22,7 +22,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(100), nullable=True)
     last_active_group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    messages = relationship("Message", back_populates="user")
+    messages = relationship("Message", back_populates="user", foreign_keys="Message.user_id")
     files = relationship("UploadedFile", back_populates="user")
 
 class Message(Base):
@@ -32,8 +32,9 @@ class Message(Base):
     content: Mapped[str] = mapped_column(Text())
     is_bot: Mapped[bool] = mapped_column(Boolean(), default=False)
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
+    dm_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    user = relationship("User", back_populates="messages")
+    user = relationship("User", back_populates="messages", foreign_keys=[user_id])
 
 class UploadedFile(Base):
     __tablename__ = "uploaded_files"
@@ -59,6 +60,7 @@ class Task(Base):
     extracted_from_message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), nullable=True)
     assigned_to: Mapped[str] = mapped_column(Text(), nullable=True)
     due_date: Mapped[str] = mapped_column(String(100), nullable=True)
+    milestone_id: Mapped[int] = mapped_column(ForeignKey("milestones.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[TaskStatus] = mapped_column(Enum(TaskStatus), default=TaskStatus.pending)
     pending_assignment: Mapped[bool] = mapped_column(Boolean(), default=False)
     assignment_expires_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -98,6 +100,10 @@ class Milestone(Base):
     title: Mapped[str] = mapped_column(String(255))
     start_date: Mapped[str] = mapped_column(String(100))
     end_date: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(Text(), nullable=True)
+    assigned_roles: Mapped[str] = mapped_column(String(255), nullable=True)
+    risk_level: Mapped[str] = mapped_column(String(50), nullable=True)
+    dependencies: Mapped[str] = mapped_column(Text(), nullable=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     group_id: Mapped[int] = mapped_column(ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
     created_at: Mapped["DateTime"] = mapped_column(DateTime(timezone=True), server_default=func.now())

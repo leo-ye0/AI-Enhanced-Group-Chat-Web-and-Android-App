@@ -69,6 +69,7 @@ class AuthPayload(BaseModel):
 class MessagePayload(BaseModel):
     content: str
     group_id: Optional[int] = None
+    dm_user_id: Optional[int] = None
     tone: Optional[str] = None
     llm_tone: Optional[str] = None
 
@@ -569,7 +570,7 @@ Provide a brief, practical explanation focusing on project flow and timeline con
             import uuid
             
             conflict_id = f"V{str(uuid.uuid4())[:8].upper()}"
-            expires_at = datetime.now() + timedelta(hours=24)
+            expires_at = datetime.now() + timedelta(hours=2)
             
             active_conflict = ActiveConflict(
                 conflict_id=conflict_id,
@@ -757,7 +758,7 @@ Provide a brief, practical explanation focusing on project flow and timeline con
                 import uuid
                 
                 conflict_id = f"V{str(uuid.uuid4())[:8].upper()}"
-                expires_at = datetime.now() + timedelta(hours=24)
+                expires_at = datetime.now() + timedelta(hours=2)
                 
                 active_conflict = ActiveConflict(
                     conflict_id=conflict_id,
@@ -846,6 +847,91 @@ async def on_startup():
     await init_db()
     await run_migrations()
     asyncio.create_task(check_expired_assignments())
+    asyncio.create_task(check_expired_votes())
+
+async def check_expired_votes():
+    """Background task to check for expired votes and generate outcome statements."""
+    while True:
+        try:
+            await asyncio.sleep(300)  # Check every 5 minutes
+            async with SessionLocal() as session:
+                now = datetime.now()
+                expired_res = await session.execute(
+                    select(ActiveConflict).where(
+                        ActiveConflict.is_resolved == False,
+                        ActiveConflict.expires_at < now
+                    )
+                )
+                expired_conflicts = expired_res.scalars().all()
+                
+                for conflict in expired_conflicts:
+                    # Get all votes
+                    votes_res = await session.execute(
+                        select(ConflictVote, User.username)
+                        .join(User, ConflictVote.user_id == User.id)
+                        .where(ConflictVote.conflict_id == conflict.conflict_id)
+                    )
+                    votes = votes_res.all()
+                    
+                    # Count votes
+                    vote_counts = {'A': 0, 'B': 0, 'C': 0}
+                    vote_details = []
+                    for vote, username in votes:
+                        vote_counts[vote.selected_option.value] += 1
+                        vote_details.append(f"{username} voted {vote.selected_option.value}: {vote.reasoning}")
+                    
+                    # Generate LLM outcome statement
+                    winner = max(vote_counts, key=vote_counts.get) if any(vote_counts.values()) else None
+                    
+                    if winner:
+                        outcome_prompt = f"""A team vote has concluded. Generate a brief outcome statement (2-3 sentences) explaining the result and why.
+
+Conflict: {conflict.reason}
+Original statement: {conflict.user_statement}
+Evidence: {conflict.conflicting_evidence[:200]}
+
+Vote results:
+- Option A (Keep & Mitigate): {vote_counts['A']} votes
+- Option B (Align with Evidence): {vote_counts['B']} votes
+- Option C (Challenge Evidence): {vote_counts['C']} votes
+
+Winning option: {winner}
+
+Vote reasoning:
+{chr(10).join(vote_details[:5])}
+
+Provide a concise statement that:
+1. States which option won
+2. Explains the team's reasoning
+3. Mentions next steps if relevant
+
+Start with: "✅ Vote Concluded:"""
+                        
+                        try:
+                            outcome_statement = await chat_completion([{"role": "user", "content": outcome_prompt}], temperature=0.3)
+                        except:
+                            outcome_statement = f"✅ Vote Concluded: Team chose Option {winner} with {vote_counts[winner]} votes (A:{vote_counts['A']}, B:{vote_counts['B']}, C:{vote_counts['C']})."
+                    else:
+                        outcome_statement = f"⏰ Vote Expired: No votes received for this conflict. Decision deferred."
+                    
+                    # Mark as resolved
+                    conflict.is_resolved = True
+                    await session.commit()
+                    
+                    # Send outcome message
+                    bot_msg = Message(
+                        user_id=None,
+                        content=outcome_statement,
+                        is_bot=True,
+                        group_id=conflict.group_id
+                    )
+                    session.add(bot_msg)
+                    await session.commit()
+                    await session.refresh(bot_msg)
+                    await broadcast_message(session, bot_msg)
+                    await manager.broadcast({"type": "voting_updated"})
+        except Exception as e:
+            print(f"Error checking expired votes: {e}")
 
 async def check_expired_assignments():
     """Background task to check for expired task assignments."""
@@ -894,30 +980,48 @@ async def signup(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
     token = create_access_token({"sub": u.username})
     return {"ok": True, "token": token}
 
-async def generate_login_summary(username: str, session: AsyncSession) -> str:
+async def generate_login_summary(username: str, session: AsyncSession, group_id: Optional[int] = None) -> str:
     """Generate personalized summary for user on login."""
-    # Get recent messages
-    msgs_res = await session.execute(select(Message).order_by(desc(Message.created_at)).limit(20))
+    # Get recent messages for current group
+    if group_id:
+        msgs_res = await session.execute(select(Message).where(Message.group_id == group_id).order_by(desc(Message.created_at)).limit(20))
+    else:
+        msgs_res = await session.execute(select(Message).where(Message.group_id == None).order_by(desc(Message.created_at)).limit(20))
     messages = list(reversed(msgs_res.scalars().all()))
     
-    # Get user's pending tasks (including pending assignments)
-    tasks_res = await session.execute(
-        select(Task).where(
-            Task.status == TaskStatus.pending,
-            Task.assigned_to.like(f"%{username}%")
-        ).order_by(Task.due_date)
-    )
+    # Get user's pending tasks (including pending assignments) for current group
+    if group_id:
+        tasks_res = await session.execute(
+            select(Task).where(
+                Task.status == TaskStatus.pending,
+                Task.assigned_to.like(f"%{username}%"),
+                Task.group_id == group_id
+            ).order_by(Task.due_date)
+        )
+    else:
+        tasks_res = await session.execute(
+            select(Task).where(
+                Task.status == TaskStatus.pending,
+                Task.assigned_to.like(f"%{username}%"),
+                Task.group_id == None
+            ).order_by(Task.due_date)
+        )
     user_tasks = tasks_res.scalars().all()
     
     # Separate pending assignments from confirmed tasks
     pending_assignments = [t for t in user_tasks if t.pending_assignment]
     confirmed_tasks = [t for t in user_tasks if not t.pending_assignment]
     
-    # Get upcoming meetings
+    # Get upcoming meetings for current group
     from datetime import datetime
-    meetings_res = await session.execute(
-        select(Meeting).where(Meeting.datetime >= datetime.now().isoformat()).order_by(Meeting.datetime).limit(3)
-    )
+    if group_id:
+        meetings_res = await session.execute(
+            select(Meeting).where(Meeting.datetime >= datetime.now().isoformat(), Meeting.group_id == group_id).order_by(Meeting.datetime).limit(3)
+        )
+    else:
+        meetings_res = await session.execute(
+            select(Meeting).where(Meeting.datetime >= datetime.now().isoformat(), Meeting.group_id == None).order_by(Meeting.datetime).limit(3)
+        )
     meetings = meetings_res.scalars().all()
     
     # If no tasks, meetings, or recent messages, return simple welcome
@@ -977,7 +1081,7 @@ async def login(payload: AuthPayload, session: AsyncSession = Depends(get_db)):
             user = user_res.scalar_one_or_none()
             group_id = user.last_active_group_id if user else None
             
-            summary = await generate_login_summary(payload.username, new_session)
+            summary = await generate_login_summary(payload.username, new_session, group_id)
             # Remove any prefix like "Here's a brief welcome message for username:"
             import re
             summary = re.sub(r'^.*?welcome message.*?:\s*["\']?', '', summary, flags=re.IGNORECASE).strip('"\'')
@@ -1012,11 +1116,24 @@ async def get_users(username: str = Depends(get_current_user_token), session: As
     return {"users": [{"username": u.username, "role": u.role} for u in users]}
 
 @app.get("/api/messages")
-async def get_messages(limit: int = 50, group_id: Optional[int] = None, session: AsyncSession = Depends(get_db)):
-    if group_id:
-        res = await session.execute(select(Message).where(Message.group_id == group_id).order_by(desc(Message.created_at)).limit(limit))
+async def get_messages(limit: int = 50, group_id: Optional[int] = None, dm_user_id: Optional[int] = None, session: AsyncSession = Depends(get_db), username: str = Depends(get_current_user_token)):
+    if dm_user_id:
+        user_res = await session.execute(select(User).where(User.username == username))
+        current_user = user_res.scalar_one_or_none()
+        from sqlalchemy import or_, and_
+        res = await session.execute(
+            select(Message).where(
+                Message.dm_user_id != None,
+                or_(
+                    and_(Message.user_id == current_user.id, Message.dm_user_id == dm_user_id),
+                    and_(Message.user_id == dm_user_id, Message.dm_user_id == current_user.id)
+                )
+            ).order_by(desc(Message.created_at)).limit(limit)
+        )
+    elif group_id:
+        res = await session.execute(select(Message).where(Message.group_id == group_id, Message.dm_user_id == None).order_by(desc(Message.created_at)).limit(limit))
     else:
-        res = await session.execute(select(Message).where(Message.group_id == None).order_by(desc(Message.created_at)).limit(limit))
+        res = await session.execute(select(Message).where(Message.group_id == None, Message.dm_user_id == None).order_by(desc(Message.created_at)).limit(limit))
     items = list(reversed(res.scalars().all()))
     out = []
     for m in items:
@@ -1051,7 +1168,7 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     if payload.tone and payload.tone in TONES:
         message_content = await adjust_tone(payload.content, payload.tone)
     
-    m = Message(user_id=u.id, content=message_content, is_bot=False, group_id=payload.group_id)
+    m = Message(user_id=u.id, content=message_content, is_bot=False, group_id=payload.group_id, dm_user_id=payload.dm_user_id)
     session.add(m)
     await session.commit()
     await session.refresh(m)
@@ -1261,9 +1378,23 @@ async def post_message(payload: MessagePayload, username: str = Depends(get_curr
     return {"ok": True, "id": m.id}
 
 @app.delete("/api/messages")
-async def clear_messages(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
-    from sqlalchemy import delete
-    await session.execute(delete(Message))
+async def clear_messages(group_id: Optional[int] = None, dm_user_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    from sqlalchemy import delete, and_, or_
+    if dm_user_id:
+        user_res = await session.execute(select(User).where(User.username == username))
+        current_user = user_res.scalar_one_or_none()
+        await session.execute(
+            delete(Message).where(
+                or_(
+                    and_(Message.user_id == current_user.id, Message.dm_user_id == dm_user_id),
+                    and_(Message.user_id == dm_user_id, Message.dm_user_id == current_user.id)
+                )
+            )
+        )
+    elif group_id:
+        await session.execute(delete(Message).where(Message.group_id == group_id))
+    else:
+        await session.execute(delete(Message).where(Message.group_id == None, Message.dm_user_id == None))
     await session.commit()
     clear_conversation_history()  # Clear AI conversation memory
     await manager.broadcast({"type": "clear"})
@@ -1455,6 +1586,7 @@ async def get_tasks(group_id: Optional[int] = None, username: str = Depends(get_
             "status": t.status.value, 
             "assigned_to": t.assigned_to, 
             "due_date": t.due_date, 
+            "milestone_id": t.milestone_id,
             "pending_assignment": t.pending_assignment if hasattr(t, 'pending_assignment') else False,
             "created_at": str(t.created_at)
         })
@@ -1500,6 +1632,7 @@ class TaskUpdatePayload(BaseModel):
     content: Optional[str] = None
     due_date: Optional[str] = None
     assigned_to: Optional[str] = None
+    milestone_id: Optional[int] = None
 
 @app.patch("/api/tasks/{task_id}")
 async def update_task(task_id: int, payload: TaskUpdatePayload, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
@@ -1512,6 +1645,8 @@ async def update_task(task_id: int, payload: TaskUpdatePayload, username: str = 
         task.due_date = payload.due_date
     if payload.assigned_to is not None:
         task.assigned_to = payload.assigned_to
+    if payload.milestone_id is not None:
+        task.milestone_id = payload.milestone_id
     await session.commit()
     await manager.broadcast({"type": "tasks_updated"})
     return {"ok": True}
@@ -1761,6 +1896,10 @@ class MilestonePayload(BaseModel):
     title: str
     start_date: str
     end_date: str
+    description: Optional[str] = None
+    assigned_roles: Optional[str] = None
+    risk_level: Optional[str] = None
+    dependencies: Optional[str] = None
 
 @app.post("/api/milestones/bulk")
 async def bulk_accept_milestones(milestones: List[MilestonePayload], group_id: Optional[int] = None, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
@@ -1784,6 +1923,10 @@ async def bulk_accept_milestones(milestones: List[MilestonePayload], group_id: O
             title=m_data.title,
             start_date=m_data.start_date,
             end_date=m_data.end_date,
+            description=m_data.description,
+            assigned_roles=m_data.assigned_roles,
+            risk_level=m_data.risk_level,
+            dependencies=m_data.dependencies,
             created_by=u.id,
             group_id=group_id
         )
@@ -1805,6 +1948,10 @@ async def create_milestone(payload: MilestonePayload, username: str = Depends(ge
         title=payload.title,
         start_date=payload.start_date,
         end_date=payload.end_date,
+        description=payload.description,
+        assigned_roles=payload.assigned_roles,
+        risk_level=payload.risk_level,
+        dependencies=payload.dependencies,
         created_by=u.id
     )
     session.add(milestone)
@@ -1820,7 +1967,7 @@ async def get_milestones(group_id: Optional[int] = None, username: str = Depends
     else:
         milestones_res = await session.execute(select(Milestone).where(Milestone.group_id == None).order_by(Milestone.start_date))
     milestones = milestones_res.scalars().all()
-    return {"milestones": [{"id": m.id, "title": m.title, "start_date": m.start_date, "end_date": m.end_date} for m in milestones]}
+    return {"milestones": [{"id": m.id, "title": m.title, "start_date": m.start_date, "end_date": m.end_date, "description": m.description, "assigned_roles": m.assigned_roles, "risk_level": m.risk_level, "dependencies": m.dependencies} for m in milestones]}
 
 @app.delete("/api/milestones/{milestone_id}")
 async def delete_milestone(milestone_id: int, username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
@@ -1842,6 +1989,10 @@ async def update_milestone(milestone_id: int, payload: MilestonePayload, usernam
     milestone.title = payload.title
     milestone.start_date = payload.start_date
     milestone.end_date = payload.end_date
+    milestone.description = payload.description
+    milestone.assigned_roles = payload.assigned_roles
+    milestone.risk_level = payload.risk_level
+    milestone.dependencies = payload.dependencies
     await session.commit()
     return {"ok": True}
 
@@ -2072,19 +2223,54 @@ async def end_conflict_voting(conflict_id: str, username: str = Depends(get_curr
     if not conflict:
         raise HTTPException(status_code=404, detail="Conflict not found")
     
-    # Get votes
+    # Get votes with usernames
     votes_res = await session.execute(
-        select(ConflictVote).where(ConflictVote.conflict_id == conflict_id)
+        select(ConflictVote, User.username)
+        .join(User, ConflictVote.user_id == User.id)
+        .where(ConflictVote.conflict_id == conflict_id)
     )
-    votes = votes_res.scalars().all()
+    votes = votes_res.all()
     
-    # Count votes
+    # Count votes and collect details
     vote_counts = {'A': 0, 'B': 0, 'C': 0}
-    for vote in votes:
+    vote_details = []
+    for vote, username_str in votes:
         vote_counts[vote.selected_option.value] += 1
+        vote_details.append(f"{username_str} voted {vote.selected_option.value}: {vote.reasoning}")
     
-    # Determine winner
-    winner = max(vote_counts, key=vote_counts.get)
+    # Generate LLM outcome statement
+    winner = max(vote_counts, key=vote_counts.get) if any(vote_counts.values()) else None
+    
+    if winner:
+        outcome_prompt = f"""A team vote has concluded. Generate a brief outcome statement (2-3 sentences) explaining the result and why.
+
+Conflict: {conflict.reason}
+Original statement: {conflict.user_statement}
+Evidence: {conflict.conflicting_evidence[:200]}
+
+Vote results:
+- Option A (Keep & Mitigate): {vote_counts['A']} votes
+- Option B (Align with Evidence): {vote_counts['B']} votes
+- Option C (Challenge Evidence): {vote_counts['C']} votes
+
+Winning option: {winner}
+
+Vote reasoning:
+{chr(10).join(vote_details[:5])}
+
+Provide a concise statement that:
+1. States which option won
+2. Explains the team's reasoning
+3. Mentions next steps if relevant
+
+Start with: "✅ Vote Concluded:"""
+        
+        try:
+            outcome_statement = await chat_completion([{"role": "user", "content": outcome_prompt}], temperature=0.3)
+        except:
+            outcome_statement = f"✅ Vote Concluded: Team chose Option {winner} with {vote_counts[winner]} votes (A:{vote_counts['A']}, B:{vote_counts['B']}, C:{vote_counts['C']})."
+    else:
+        outcome_statement = f"⏰ Vote Ended: No votes received. Decision deferred."
     
     # Mark conflict as resolved
     conflict.is_resolved = True
@@ -2099,8 +2285,19 @@ async def end_conflict_voting(conflict_id: str, username: str = Depends(get_curr
         group_id=conflict.group_id
     )
     session.add(decision_log)
-    
     await session.commit()
+    
+    # Send outcome message to chat
+    bot_msg = Message(
+        user_id=None,
+        content=outcome_statement,
+        is_bot=True,
+        group_id=conflict.group_id
+    )
+    session.add(bot_msg)
+    await session.commit()
+    await session.refresh(bot_msg)
+    await broadcast_message(session, bot_msg)
     
     # Broadcast update
     await manager.broadcast({"type": "voting_updated"})
@@ -2204,6 +2401,142 @@ async def get_last_active_group(username: str = Depends(get_current_user_token),
         if group:
             return {"group_id": group.id, "group_name": group.name}
     return {"group_id": None, "group_name": "OmniPal Chat"}
+
+@app.get("/api/dashboard")
+async def get_dashboard(username: str = Depends(get_current_user_token), session: AsyncSession = Depends(get_db)):
+    """Get comprehensive dashboard data across all user's groups."""
+    from datetime import datetime, date
+    
+    # Get user
+    user_res = await session.execute(select(User).where(User.username == username))
+    user = user_res.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid user")
+    
+    # Get all groups user is in
+    memberships_res = await session.execute(select(GroupMembership).where(GroupMembership.user_id == user.id))
+    memberships = memberships_res.scalars().all()
+    group_ids = [m.group_id for m in memberships]
+    
+    dashboard_data = {"groups": []}
+    
+    # Add personal workspace (group_id = None)
+    all_group_ids = [None] + group_ids
+    
+    for gid in all_group_ids:
+        # Get group info
+        if gid:
+            group = await session.get(Group, gid)
+            group_name = group.name if group else "Unknown"
+        else:
+            group_name = "Personal Workspace"
+        
+        # Get tasks for this group
+        if gid:
+            tasks_res = await session.execute(
+                select(Task).where(Task.group_id == gid).order_by(Task.due_date)
+            )
+        else:
+            tasks_res = await session.execute(
+                select(Task).where(Task.group_id == None).order_by(Task.due_date)
+            )
+        all_tasks = tasks_res.scalars().all()
+        
+        # Filter user's tasks
+        my_tasks = [t for t in all_tasks if t.assigned_to and username in t.assigned_to]
+        my_pending = [t for t in my_tasks if t.status == TaskStatus.pending]
+        
+        # Get overdue tasks
+        today = date.today()
+        overdue = [t for t in my_pending if t.due_date and datetime.strptime(t.due_date, "%Y-%m-%d").date() < today]
+        due_soon = [t for t in my_pending if t.due_date and datetime.strptime(t.due_date, "%Y-%m-%d").date() >= today and datetime.strptime(t.due_date, "%Y-%m-%d").date() <= today + timedelta(days=3)]
+        
+        # Get recent messages
+        if gid:
+            msgs_res = await session.execute(
+                select(Message).where(Message.group_id == gid, Message.is_bot == False)
+                .order_by(desc(Message.created_at)).limit(5)
+            )
+        else:
+            msgs_res = await session.execute(
+                select(Message).where(Message.group_id == None, Message.is_bot == False)
+                .order_by(desc(Message.created_at)).limit(5)
+            )
+        recent_messages = msgs_res.scalars().all()
+        
+        # Get active conflicts
+        if gid:
+            conflicts_res = await session.execute(
+                select(ActiveConflict).where(
+                    ActiveConflict.group_id == gid,
+                    ActiveConflict.is_resolved == False,
+                    ActiveConflict.expires_at > datetime.now()
+                )
+            )
+        else:
+            conflicts_res = await session.execute(
+                select(ActiveConflict).where(
+                    ActiveConflict.group_id == None,
+                    ActiveConflict.is_resolved == False,
+                    ActiveConflict.expires_at > datetime.now()
+                )
+            )
+        active_conflicts = conflicts_res.scalars().all()
+        
+        # Get upcoming meetings
+        if gid:
+            meetings_res = await session.execute(
+                select(Meeting).where(
+                    Meeting.group_id == gid,
+                    Meeting.datetime >= datetime.now().isoformat()
+                ).order_by(Meeting.datetime).limit(3)
+            )
+        else:
+            meetings_res = await session.execute(
+                select(Meeting).where(
+                    Meeting.group_id == None,
+                    Meeting.datetime >= datetime.now().isoformat()
+                ).order_by(Meeting.datetime).limit(3)
+            )
+        upcoming_meetings = meetings_res.scalars().all()
+        
+        dashboard_data["groups"].append({
+            "group_id": gid,
+            "group_name": group_name,
+            "stats": {
+                "total_tasks": len(all_tasks),
+                "my_tasks": len(my_tasks),
+                "pending_tasks": len(my_pending),
+                "overdue_tasks": len(overdue),
+                "due_soon_tasks": len(due_soon),
+                "active_conflicts": len(active_conflicts),
+                "upcoming_meetings": len(upcoming_meetings)
+            },
+            "my_tasks": [{
+                "id": t.id,
+                "content": t.content,
+                "due_date": t.due_date,
+                "status": t.status.value,
+                "is_overdue": t.due_date and datetime.strptime(t.due_date, "%Y-%m-%d").date() < today
+            } for t in my_pending[:5]],
+            "recent_activity": [{
+                "type": "message",
+                "content": m.content[:100],
+                "created_at": str(m.created_at)
+            } for m in recent_messages[:3]],
+            "conflicts": [{
+                "conflict_id": c.conflict_id,
+                "reason": c.reason,
+                "severity": c.severity.value
+            } for c in active_conflicts],
+            "meetings": [{
+                "id": m.id,
+                "title": m.title,
+                "datetime": m.datetime
+            } for m in upcoming_meetings]
+        })
+    
+    return dashboard_data
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
