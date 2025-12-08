@@ -2666,3 +2666,15 @@ async function switchToDM(username) {
     console.error('Failed to switch to DM:', e);
   }
 }
+
+// Mobile: hide nav when clicking outside
+if (window.innerWidth <= 480) {
+  document.addEventListener('click', (e) => {
+    const leftNav = document.getElementById('leftNav');
+    const toggleBtn = document.getElementById('toggleLeftNav');
+    if (leftNav && !leftNav.classList.contains('hidden') && 
+        !leftNav.contains(e.target) && e.target !== toggleBtn) {
+      leftNav.classList.add('hidden');
+    }
+  });
+}

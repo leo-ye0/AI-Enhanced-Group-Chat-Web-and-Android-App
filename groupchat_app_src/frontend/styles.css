@@ -66,9 +66,10 @@ button:hover{filter:brightness(1.1)}
 .no-meetings{padding:12px;text-align:center;opacity:0.5;font-size:12px}
 .main-chat{display:flex;flex-direction:column;height:100%}
 .messages{flex:1;overflow-y:auto;overflow-x:hidden;border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#f9fafb;min-height:0}
-.message{padding:10px 12px;margin:10px 0;border-radius:12px;background:#ffffff;border:1px solid #e5e7eb}
+.message{padding:10px 12px;margin:10px 0;border-radius:12px;background:#f3f4f6;border:1px solid #d1d5db;max-width:70%;clear:both;float:left}
 .message .meta{font-size:12px;opacity:.7;margin-bottom:6px}
 .message.bot{background:#f0fdf4;border-color:#10a37f}
+.message.current-user{background:#dbeafe;border-color:#3b82f6;float:right;margin-left:auto}
 .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 .header-buttons{display:flex;gap:8px}
 .composer{display:flex;gap:12px;margin-top:12px;flex-shrink:0;position:relative}
@@ -130,14 +131,25 @@ button:hover{filter:brightness(1.1)}
 #sidebar,#taskPanel{width:100%;height:150px;max-height:150px;margin-top:24px}
 }
 @media (max-width: 480px) {
-.container{padding:8px;max-width:100%}
+.container{padding:8px;max-width:100%;margin-left:0;margin-right:0}
 .auth,.chat{padding:12px}
 .row{gap:6px;margin:6px 0}
-input{padding:6px 8px;font-size:14px}
-button{padding:8px 12px;font-size:14px}
+input{padding:10px 12px;font-size:16px}
+button{padding:10px 14px;font-size:16px}
 h1{font-size:20px;margin:0 0 8px 0}
 p{font-size:14px;margin:0 0 12px 0}
 .hint{font-size:11px}
 #sidebar,#taskPanel{height:120px;margin-top:24px}
 .main-chat{height:40vh}
+.left-nav{width:auto;max-width:70%;border-right:none!important;position:fixed;top:0;left:0;bottom:0;z-index:100}
+.chat,.dashboard{position:relative;z-index:1}
+.right-sidebar{width:100%;position:relative;height:100vh;overflow-y:auto}
+.toggle-left-nav-btn{display:block!important;position:fixed;top:8px;right:8px;z-index:102;width:24px;height:24px;padding:0;font-size:16px;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.2)}
+.chat-container{height:60vh}
+.message{max-width:85%}
+.resize-handle{display:none!important}
+#chatInput{font-size:16px;padding:10px 12px}
 }
+.dashboard{flex:1;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;box-shadow:0 4px 12px rgba(0,0,0,.1);padding:16px;overflow-y:auto}
+.dashboard .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:16px;border-bottom:2px solid #e5e7eb}
+.dashboard h2{margin:0;font-size:24px;color:#374151}
